@@ -36,9 +36,8 @@ final class ManhuarenService {
         log.info("fetchComicList url=\(url)")
         let html = try await fetchHTML(url: url)
         let galleries = parseGalleryList(from: html)
-        // 沒有明確的 totalPages，用 pagesize 估算
-        let pageSize = parseJSVar("pagesize", from: html).flatMap(Int.init) ?? 21
-        let totalPages = galleries.count >= pageSize ? page + 1 : page
+        // 網站無明確 totalPages，有結果就繼續，空了就停
+        let totalPages = galleries.isEmpty ? page : page + 1
         return (galleries, totalPages)
     }
 
@@ -70,11 +69,9 @@ final class ManhuarenService {
     // MARK: - 解析：列表
 
     func parseGalleryList(from html: String) -> [Gallery] {
-        // 搜尋頁：book-list-cover  href="/manhua-xxx/" title="xxx"><img src="...">
-        // 分類頁：manga-list-2      href="/manhua-xxx/?from=..."
         var galleries: [Gallery] = []
 
-        // 搜尋頁格式
+        // 搜尋頁格式：href="..." title="..."><img src="...">
         let searchPattern = #"href="(/manhua-[^"?]+/)"[^>]*title="([^"]+)"[^>]*>\s*<img[^>]+src="(https?://[^"]+)""#
         if let regex = try? NSRegularExpression(pattern: searchPattern) {
             let range = NSRange(html.startIndex..., in: html)
@@ -95,24 +92,33 @@ final class ManhuarenService {
         }
         if !galleries.isEmpty { return galleries }
 
-        // 分類/列表頁格式：封面與標題分兩個 block，用整體 li 解析
-        let liPattern = #"<li>.*?href="(/manhua-[^"?]+)(?:\?[^"]*)?"[^>]*>.*?manga-list-2-cover-img[^>]*src="(https?://[^"]+)".*?manga-list-2-title[^>]*>\s*<a[^>]*>([^<]+)</a>"#
-        if let regex = try? NSRegularExpression(pattern: liPattern, options: .dotMatchesLineSeparators) {
-            let range = NSRange(html.startIndex..., in: html)
-            for m in regex.matches(in: html, range: range) {
-                guard let r1 = Range(m.range(at: 1), in: html),
-                      let r2 = Range(m.range(at: 2), in: html),
-                      let r3 = Range(m.range(at: 3), in: html) else { continue }
-                let path  = String(html[r1])
-                let thumb = URL(string: String(html[r2]))
-                let title = String(html[r3]).mhrHTMLDecoded()
-                let slug  = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                let gURL  = URL(string: "\(base)\(path)")!
-                galleries.append(Gallery(id: slug, token: slug, title: title,
-                                         thumbURL: thumb, pageCount: nil, category: nil,
-                                         uploader: nil, source: SourceID.manhuaren.rawValue,
-                                         galleryURL: gURL))
-            }
+        // 分類/列表頁格式：分兩步抓 href 與 title，按順序配對
+        // step1: 從 manga-list-2-cover-img 取 href + thumb
+        let coverPattern = #"href="(/manhua-[^"?]+)[^"]*">[^<]*<img[^>]+class="manga-list-2-cover-img"[^>]+src="(https?://[^"]+)""#
+        // step2: 從 manga-list-2-title 取 title
+        let titlePattern = #"class="manga-list-2-title"[^>]*>\s*<a[^>]*>([^<]+)</a>"#
+
+        guard let coverReg = try? NSRegularExpression(pattern: coverPattern),
+              let titleReg = try? NSRegularExpression(pattern: titlePattern) else { return [] }
+        let range = NSRange(html.startIndex..., in: html)
+        let covers = coverReg.matches(in: html, range: range)
+        let titles = titleReg.matches(in: html, range: range)
+        guard !covers.isEmpty else { return [] }
+        let count = min(covers.count, titles.count)
+
+        for (cover, titleMatch) in zip(covers.prefix(count), titles.prefix(count)) {
+            guard let r1 = Range(cover.range(at: 1), in: html),
+                  let r2 = Range(cover.range(at: 2), in: html),
+                  let r3 = Range(titleMatch.range(at: 1), in: html) else { continue }
+            let path  = String(html[r1])
+            let thumb = URL(string: String(html[r2]))
+            let title = String(html[r3]).mhrHTMLDecoded()
+            let slug  = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let gURL  = URL(string: "\(base)\(path)")!
+            galleries.append(Gallery(id: slug, token: slug, title: title,
+                                     thumbURL: thumb, pageCount: nil, category: nil,
+                                     uploader: nil, source: SourceID.manhuaren.rawValue,
+                                     galleryURL: gURL))
         }
         return galleries
     }
