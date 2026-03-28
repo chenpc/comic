@@ -96,7 +96,7 @@ final class ManhuarenService {
         if !galleries.isEmpty { return galleries }
 
         // 分類/列表頁格式：封面與標題分兩個 block，用整體 li 解析
-        let liPattern = #"<li>.*?href="(/manhua-[^"?]+)(?:\?[^"]*)?"\s[^>]*>.*?manga-list-2-cover-img[^>]*src="(https?://[^"]+)".*?manga-list-2-title[^>]*>\s*<a[^>]*>([^<]+)</a>"#
+        let liPattern = #"<li>.*?href="(/manhua-[^"?]+)(?:\?[^"]*)?"[^>]*>.*?manga-list-2-cover-img[^>]*src="(https?://[^"]+)".*?manga-list-2-title[^>]*>\s*<a[^>]*>([^<]+)</a>"#
         if let regex = try? NSRegularExpression(pattern: liPattern, options: .dotMatchesLineSeparators) {
             let range = NSRange(html.startIndex..., in: html)
             for m in regex.matches(in: html, range: range) {
@@ -142,12 +142,12 @@ final class ManhuarenService {
     // MARK: - 解析：章節圖片（解碼 JS packer）
 
     func extractImages(from html: String) throws -> [URL] {
-        // 找 <script type="...">eval(function(p,a,c,k,e,d){...}(...))</script>
-        let scriptPattern = #"<script[^>]*>\s*(eval\(function\(p,a,c,k,e,d\).*?)\s*</script>"#
+        // 找包含 newImgs 的 <script> 標籤（可能是 packer 或明文）
+        let scriptPattern = #"<script[^>]*>\s*((?:eval\(function|var\s+newImgs)[^<]+)\s*</script>"#
         guard let regex = try? NSRegularExpression(pattern: scriptPattern, options: .dotMatchesLineSeparators),
               let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let r = Range(m.range(at: 1), in: html) else {
-            log.warning("extractImages: 找不到 packed JS")
+            log.warning("extractImages: 找不到包含 newImgs 的 script")
             throw MHRError.parseError
         }
         let packedJS = String(html[r])
