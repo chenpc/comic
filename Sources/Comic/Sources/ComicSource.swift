@@ -53,6 +53,7 @@ final class SourceManager: ObservableObject {
         switch activeSourceID {
         case .ehentai:   return EHentaiSource.shared
         case .manhuagui: return ManhuaguiSource.shared
+        case .manhuaren: return ManhuarenSource.shared
         }
     }
 

@@ -3,8 +3,9 @@ import Foundation
 // MARK: - 來源
 
 enum SourceID: String, CaseIterable, Identifiable, Codable {
-    case ehentai   = "ehentai"
-    case manhuagui = "manhuagui"
+    case ehentai    = "ehentai"
+    case manhuagui  = "manhuagui"
+    case manhuaren  = "manhuaren"
 
     var id: String { rawValue }
 
@@ -12,6 +13,7 @@ enum SourceID: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .ehentai:   return "E-Hentai"
         case .manhuagui: return "漫畫櫃"
+        case .manhuaren: return "漫畫人"
         }
     }
 
@@ -19,6 +21,7 @@ enum SourceID: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .ehentai:   return "photo.on.rectangle.angled"
         case .manhuagui: return "book.closed"
+        case .manhuaren: return "books.vertical"
         }
     }
 }
