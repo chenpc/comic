@@ -264,10 +264,11 @@ final class ReaderViewModel: ObservableObject {
     private func prefetchAhead(from index: Int) {
         let count = prefetchCount
         if isLocalFile {
+            let snapshotLocal = localImageURLs
             Task {
-                let end = min(index + 1 + count, localImageURLs.count)
+                let end = min(index + 1 + count, snapshotLocal.count)
                 for i in (index + 1)..<end {
-                    await ImageLoader.shared.prefetch(url: localImageURLs[i])
+                    await ImageLoader.shared.prefetch(url: snapshotLocal[i])
                 }
                 // 若預讀超出章節末尾，繼續預讀下一集
                 let remaining = count - (end - index - 1)
@@ -276,11 +277,12 @@ final class ReaderViewModel: ObservableObject {
                 }
             }
         } else if !directImageURLs.isEmpty {
+            let snapshotDirect = directImageURLs
             let referer = imageReferer
             Task {
-                let end = min(index + 1 + count, directImageURLs.count)
+                let end = min(index + 1 + count, snapshotDirect.count)
                 for i in (index + 1)..<end {
-                    await ImageLoader.shared.prefetch(url: directImageURLs[i], referer: referer)
+                    await ImageLoader.shared.prefetch(url: snapshotDirect[i], referer: referer)
                 }
                 let remaining = count - (end - index - 1)
                 if remaining > 0, let next = nextChapterInList() {
@@ -288,11 +290,12 @@ final class ReaderViewModel: ObservableObject {
                 }
             }
         } else {
+            let snapshotPageURLs = imagePageURLs
             Task {
-                let end = min(index + 1 + count, imagePageURLs.count)
+                let end = min(index + 1 + count, snapshotPageURLs.count)
                 for i in (index + 1)..<end {
                     guard !Task.isCancelled else { break }
-                    let pageURL = imagePageURLs[i]
+                    let pageURL = snapshotPageURLs[i]
                     if imageURLCache[pageURL] == nil,
                        let url = try? await EHentaiService.shared.fetchImageURL(pageURL: pageURL) {
                         imageURLCache[pageURL] = url
