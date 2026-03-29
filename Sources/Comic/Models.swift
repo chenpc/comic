@@ -6,22 +6,25 @@ enum SourceID: String, CaseIterable, Identifiable, Codable {
     case ehentai    = "ehentai"
     case manhuagui  = "manhuagui"
     case manhuaren  = "manhuaren"
+    case eightcomic = "8comic"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .ehentai:   return "E-Hentai"
-        case .manhuagui: return "漫畫櫃"
-        case .manhuaren: return "漫畫人"
+        case .ehentai:    return "E-Hentai"
+        case .manhuagui:  return "漫畫櫃"
+        case .manhuaren:  return "漫畫人"
+        case .eightcomic: return "無限動漫"
         }
     }
 
     var iconName: String {
         switch self {
-        case .ehentai:   return "photo.on.rectangle.angled"
-        case .manhuagui: return "book.closed"
-        case .manhuaren: return "books.vertical"
+        case .ehentai:    return "photo.on.rectangle.angled"
+        case .manhuagui:  return "book.closed"
+        case .manhuaren:  return "books.vertical"
+        case .eightcomic: return "infinity"
         }
     }
 }
@@ -130,4 +133,49 @@ struct Chapter: Identifiable, Hashable {
     let title: String
     let url: URL
     let pageCount: Int?
+}
+
+// MARK: - Chapter 集數導航輔助
+
+extension Chapter {
+    /// 從標題擷取集數與後綴（集/回/卷/話/章/期），回傳 (number, suffix)
+    var chapterNumber: (Double, String)? {
+        guard let m = title.range(of: #"(\d+(?:\.\d+)?)\s*([集回卷話章期]?)"#,
+                                  options: .regularExpression) else { return nil }
+        let matched = title[m]
+        guard let numRange = matched.range(of: #"^\d+(?:\.\d+)?"#, options: .regularExpression),
+              let num = Double(matched[numRange]) else { return nil }
+        let suffix = String(matched[numRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+        return (num, suffix)
+    }
+}
+
+extension [Chapter] {
+    /// 找下一集：優先找數字剛好大一點的，同數字多個時優先後綴相同的
+    func adjacentChapter(after current: Chapter) -> Chapter? {
+        guard let (curNum, curSuffix) = current.chapterNumber else { return nil }
+        let candidates = compactMap { ch -> (Double, String, Chapter)? in
+            guard let (n, s) = ch.chapterNumber, n > curNum else { return nil }
+            return (n, s, ch)
+        }.sorted { $0.0 < $1.0 }
+        guard !candidates.isEmpty else { return nil }
+        let nextNum = candidates[0].0
+        let sameNum = candidates.filter { $0.0 == nextNum }
+        if sameNum.count == 1 { return sameNum[0].2 }
+        return sameNum.first(where: { $0.1 == curSuffix })?.2 ?? sameNum[0].2
+    }
+
+    /// 找上一集：優先找數字剛好小一點的，同數字多個時優先後綴相同的
+    func adjacentChapter(before current: Chapter) -> Chapter? {
+        guard let (curNum, curSuffix) = current.chapterNumber else { return nil }
+        let candidates = compactMap { ch -> (Double, String, Chapter)? in
+            guard let (n, s) = ch.chapterNumber, n < curNum else { return nil }
+            return (n, s, ch)
+        }.sorted { $0.0 > $1.0 }
+        guard !candidates.isEmpty else { return nil }
+        let prevNum = candidates[0].0
+        let sameNum = candidates.filter { $0.0 == prevNum }
+        if sameNum.count == 1 { return sameNum[0].2 }
+        return sameNum.first(where: { $0.1 == curSuffix })?.2 ?? sameNum[0].2
+    }
 }

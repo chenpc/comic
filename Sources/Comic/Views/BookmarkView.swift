@@ -50,8 +50,11 @@ struct BookmarkCard: View {
         let dlState = downloads.state(for: gallery)
 
         ZStack(alignment: .topTrailing) {
-            GalleryCard(gallery: gallery)
-                .onTapGesture { onSelect(gallery) }
+            Button { onSelect(gallery) } label: {
+                GalleryCard(gallery: gallery)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
             // 右上角：書籤移除
             Button {

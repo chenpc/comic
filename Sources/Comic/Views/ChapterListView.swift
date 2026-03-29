@@ -152,7 +152,7 @@ struct ChapterListView: View {
         isLoading = true
         error = nil
         do {
-            chapters = try await ManhuaguiSource.shared.fetchChapters(gallery: gallery)
+            chapters = try await SourceManager.shared.source(for: gallery.sourceID).fetchChapters(gallery: gallery)
         } catch {
             self.error = error.localizedDescription
         }
@@ -206,6 +206,14 @@ private struct ChapterRow: View {
             .buttonStyle(.plain)
 
             downloadControl
+        }
+        .contextMenu {
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(chapter.url.absoluteString, forType: .string)
+            } label: {
+                Label("複製章節連結", systemImage: "link")
+            }
         }
     }
 

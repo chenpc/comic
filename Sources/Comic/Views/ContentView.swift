@@ -9,17 +9,27 @@ struct ContentView: View {
     @State private var showChapterList = false
     @State private var sidebarTab: SidebarTab = .browse
     @State private var isFullscreen = false
+    @State private var libraryGallery: Gallery?   // library 模式下選中的漫畫
 
-    enum SidebarTab { case browse, bookmarks, settings }
+    enum SidebarTab { case browse, bookmarks, library, settings }
 
     var body: some View {
+        // 全螢幕閱讀時跳過 NavigationSplitView，確保 toolbar 完全消失
+        if isFullscreen && showReader {
+            ReaderView(vm: readerVM, isFullscreen: true)
+                .ignoresSafeArea()
+                .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+                    isFullscreen = false
+                }
+        } else {
         NavigationSplitView {
             VStack(spacing: 0) {
                 // 分頁按鈕 + 來源下拉選單
                 HStack(spacing: 0) {
-                    tabButton(title: "瀏覽", icon: "rectangle.grid.2x2", tab: .browse)
-                    tabButton(title: "書籤", icon: "bookmark", tab: .bookmarks)
-                    tabButton(title: "設定", icon: "gearshape", tab: .settings)
+                    tabButton(title: "瀏覽", icon: "rectangle.grid.2x2", tab: .browse) { libraryGallery = nil }
+                    tabButton(title: "書籤", icon: "bookmark", tab: .bookmarks) { libraryGallery = nil }
+                    tabButton(title: "Library", icon: "internaldrive", tab: .library) {}
+                    tabButton(title: "設定", icon: "gearshape", tab: .settings) { libraryGallery = nil }
 
                     Divider().frame(width: 1, height: 20).padding(.horizontal, 4)
 
@@ -43,30 +53,63 @@ struct ContentView: View {
                 switch sidebarTab {
                 case .browse:    GalleryListView(onSelect: gallerySelected)
                 case .bookmarks: BookmarkView(store: bookmarks, onSelect: gallerySelected)
+                case .library:
+                    LibraryView(
+                        onSelectGallery: { gallery in
+                            libraryGallery = gallery
+                            selectedGallery = gallery
+                            showChapterList = true
+                            showReader = false
+                        },
+                        onSelectChapter: { chapter, allChapters, startPage, gallery in
+                            libraryGallery = gallery
+                            openLibraryChapter(chapter, gallery: gallery, allChapters: allChapters, startPage: startPage)
+                        }
+                    )
                 case .settings:  SettingsView()
                 }
             }
             .navigationSplitViewColumnWidth(min: 400, ideal: 500)
         } detail: {
             if showChapterList, let gallery = selectedGallery {
-                ChapterListView(gallery: gallery, onSelect: { ch, all, page in openChapter(ch, allChapters: all, startPage: page) }, onBack: {
-                    showChapterList = false
-                    showReader = false
-                })
-                .id(gallery.id)  // 切換漫畫時強制重新載入章節列表
+                if libraryGallery?.id == gallery.id {
+                    // Library 模式：從本地檔案系統列出章節
+                    LocalChapterListView(
+                        gallery: gallery,
+                        onSelect: { ch, all, page in
+                            openLibraryChapter(ch, gallery: gallery, allChapters: all, startPage: page)
+                        },
+                        onBack: {
+                            showChapterList = false
+                            showReader = false
+                            libraryGallery = nil
+                        }
+                    )
+                    .id(gallery.id)
+                } else {
+                    ChapterListView(gallery: gallery, onSelect: { ch, all, page in openChapter(ch, allChapters: all, startPage: page) }, onBack: {
+                        showChapterList = false
+                        showReader = false
+                    })
+                    .id(gallery.id)
+                }
             } else if showReader {
                 VStack(spacing: 0) {
                     if !isFullscreen {
                         HStack {
                             Button {
-                                if selectedGallery?.sourceID == .manhuagui {
+                                if libraryGallery != nil {
+                                    showReader = false
+                                    showChapterList = true
+                                } else if selectedGallery.map({ SourceManager.shared.source(for: $0.sourceID).hasChapters }) == true {
                                     showChapterList = true
                                 } else {
                                     showReader = false
                                 }
                             } label: {
                                 Image(systemName: "chevron.left")
-                                Text(selectedGallery?.sourceID == .manhuagui ? "章節" : "返回")
+                                Text(libraryGallery != nil ? "章節"
+                                     : (selectedGallery.map { SourceManager.shared.source(for: $0.sourceID).hasChapters } == true) ? "章節" : "返回")
                             }
                             .buttonStyle(.borderless)
 
@@ -133,11 +176,13 @@ struct ContentView: View {
         )) {
             JumpSheet(vm: readerVM)
         }
+        } // end else (非全螢幕)
     }
 
     private func gallerySelected(_ gallery: Gallery) {
         selectedGallery = gallery
-        if gallery.sourceID == .manhuagui {
+        let src = SourceManager.shared.source(for: gallery.sourceID)
+        if src.hasChapters {
             showChapterList = true
             showReader = false
         } else {
@@ -154,9 +199,17 @@ struct ContentView: View {
         Task { await readerVM.loadChapter(chapter, gallery: gallery, allChapters: allChapters, startPage: startPage) }
     }
 
-    private func tabButton(title: String, icon: String, tab: SidebarTab) -> some View {
+    private func openLibraryChapter(_ chapter: Chapter, gallery: Gallery, allChapters: [Chapter], startPage: Int = 0) {
+        print("[Library] openLibraryChapter: \(chapter.title) url=\(chapter.url)")
+        showChapterList = false
+        showReader = true
+        Task { await readerVM.loadChapter(chapter, gallery: gallery, allChapters: allChapters, startPage: startPage) }
+    }
+
+    private func tabButton(title: String, icon: String, tab: SidebarTab, extra: (() -> Void)? = nil) -> some View {
         Button {
             sidebarTab = tab
+            extra?()
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: sidebarTab == tab ? "\(icon).fill" : icon)
@@ -168,6 +221,7 @@ struct ContentView: View {
             .padding(.vertical, 5)
             .background(sidebarTab == tab ? Color.accentColor.opacity(0.12) : .clear)
             .cornerRadius(6)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

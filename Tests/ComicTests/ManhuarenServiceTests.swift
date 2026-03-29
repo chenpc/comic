@@ -224,3 +224,40 @@ final class ManhuarenExtractImagesTests: XCTestCase {
         XCTAssertThrowsError(try svc.extractImages(from: html))
     }
 }
+
+// MARK: - 整合測試（需要網路）
+
+final class ManhuarenIntegrationTests: XCTestCase {
+
+    private let svc = ManhuarenService()
+
+    // MARK: - 列表
+
+    func test_fetchList_page1_returns21Items() async throws {
+        let (galleries, _) = try await svc.fetchComicList(page: 1, search: "", slug: "")
+        XCTAssertEqual(galleries.count, 21, "第 1 頁應有 21 筆")
+        XCTAssertEqual(galleries.first?.title, "海贼王")
+    }
+
+    func test_fetchList_page2_differentFromPage1() async throws {
+        let (p1, _) = try await svc.fetchComicList(page: 1, search: "", slug: "")
+        let (p2, _) = try await svc.fetchComicList(page: 2, search: "", slug: "")
+        XCTAssertEqual(p2.count, 21, "第 2 頁應有 21 筆")
+        XCTAssertNotEqual(p1.map(\.id), p2.map(\.id), "page1 與 page2 內容應不同")
+    }
+
+    func test_fetchChapters_haizeiwang_returnsChapters() async throws {
+        let url = URL(string: "https://www.manhuaren.com/manhua-haizeiwang-onepiece/")!
+        let chapters = try await svc.fetchChapters(galleryURL: url)
+        XCTAssertGreaterThan(chapters.count, 100, "海贼王應有 100+ 章")
+        XCTAssertTrue(chapters.last?.title.contains("1177") == true || chapters.count > 900,
+                      "最新章節應含 1177")
+    }
+
+    func test_fetchChapterImages_returnsURLs() async throws {
+        let url = URL(string: "https://www.manhuaren.com/m1767265/")!
+        let images = try await svc.fetchChapterImages(chapterURL: url)
+        XCTAssertGreaterThan(images.count, 0, "應有至少 1 張圖片")
+        XCTAssertTrue(images.first?.scheme == "https")
+    }
+}

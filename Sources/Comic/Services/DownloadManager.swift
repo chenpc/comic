@@ -120,6 +120,9 @@ final class DownloadManager: ObservableObject {
 
     func state(for gallery: Gallery) -> DownloadState {
         if cbzURL(for: gallery) != nil { return .completed }
+        // 章節型來源：有任何章節 CBZ 在磁碟 = 已下載（跨重啟也能正確顯示）
+        if (gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic),
+           downloadedChapterCount(gallery: gallery) > 0 { return .completed }
         // 有 staging 目錄 = 已下載一部分
         if let dir = stagingDir(for: gallery),
            FileManager.default.fileExists(atPath: dir.path) {
@@ -131,7 +134,11 @@ final class DownloadManager: ObservableObject {
     }
 
     func isDownloaded(_ gallery: Gallery) -> Bool {
-        cbzURL(for: gallery) != nil
+        if cbzURL(for: gallery) != nil { return true }
+        if (gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic) {
+            return downloadedChapterCount(gallery: gallery) > 0
+        }
+        return false
     }
 
     func cbzURL(for gallery: Gallery) -> URL? {
@@ -183,8 +190,9 @@ final class DownloadManager: ObservableObject {
         if let cbz = cbzURL(for: gallery) {
             try? FileManager.default.removeItem(at: cbz)
         }
-        // 漫畫櫃：刪除整個漫畫資料夾（含所有章節 CBZ）
-        if gallery.sourceID == .manhuagui, let folder = comicFolder(for: gallery) {
+        // 章節型來源：刪除整個漫畫資料夾（含所有章節 CBZ）
+        let isChapterBased = gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic
+        if isChapterBased, let folder = comicFolder(for: gallery) {
             try? FileManager.default.removeItem(at: folder)
         }
         // 清除 staging 殘留
@@ -256,15 +264,21 @@ final class DownloadManager: ObservableObject {
     // MARK: - Core Download
 
     private func performDownload(gallery: Gallery) async {
+        // 章節型來源（漫畫人、漫畫櫃）：先取章節列表再逐章下載
+        let isChapterBased = gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic
+        if isChapterBased {
+            await performChapterBasedDownload(gallery: gallery)
+            return
+        }
+
+        // E-Hentai 單 CBZ 流程
         dlog("performDownload START \(gallery.id) '\(gallery.title)'")
         guard let libURL = SettingsStore.shared.libraryURL else { return }
-
         guard let stagingDir = stagingDir(for: gallery) else { return }
 
         do {
             try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
-            // 載入或建立 progress
             var progress = loadProgress(gallery: gallery) ?? {
                 DownloadProgress(galleryID: gallery.id,
                                  galleryTitle: gallery.title,
@@ -273,7 +287,6 @@ final class DownloadManager: ObservableObject {
                                  completedIndices: [])
             }()
 
-            // 若 pageURLs 還沒取得，先抓
             if progress.pageURLs.isEmpty {
                 dlog("  fetching page URLs...")
                 progress.pageURLs = try await EHentaiService.shared.fetchImagePageURLs(galleryURL: gallery.galleryURL)
@@ -284,17 +297,15 @@ final class DownloadManager: ObservableObject {
             let total = progress.pageURLs.count
             guard total > 0 else { throw DownloadError.noImages }
 
-            // 逐頁下載，跳過已完成的
             for (i, pageURL) in progress.pageURLs.enumerated() {
                 if Task.isCancelled { dlog("  CANCELLED at \(i+1)"); throw CancellationError() }
-                if progress.completedIndices.contains(i) { continue }  // 已下載，跳過
+                if progress.completedIndices.contains(i) { continue }
 
                 await MainActor.run {
                     states[gallery.id] = .downloading(page: progress.completed + 1, total: total)
                 }
                 if i % 10 == 0 { dlog("  page \(i+1)/\(total)") }
 
-                // 最多重試 3 次
                 var lastError: Error?
                 for attempt in 1...3 {
                     do {
@@ -303,7 +314,7 @@ final class DownloadManager: ObservableObject {
                         let ext = imageURL.pathExtension.isEmpty ? "jpg" : imageURL.pathExtension
                         try data.write(to: imageFile(stagingDir: stagingDir, index: i, ext: ext))
                         progress.completedIndices.insert(i)
-                        saveProgress(progress, gallery: gallery)  // 每頁完成後儲存進度
+                        saveProgress(progress, gallery: gallery)
                         lastError = nil
                         break
                     } catch {
@@ -317,15 +328,12 @@ final class DownloadManager: ObservableObject {
                 if let err = lastError { throw err }
             }
 
-            // 打包 CBZ（存至來源子資料夾）
             dlog("  packaging...")
             await MainActor.run { states[gallery.id] = .packaging }
             let sourceFolder = libURL.appendingPathComponent(gallery.source)
             try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
             let cbzDest = sourceFolder.appendingPathComponent("\(gallery.id).cbz")
             try await packageAsCBZ(sourceDir: stagingDir, destination: cbzDest)
-
-            // 清除 staging
             try? FileManager.default.removeItem(at: stagingDir)
             await MainActor.run { states[gallery.id] = .completed }
             dlog("  COMPLETED \(gallery.id)")
@@ -341,12 +349,48 @@ final class DownloadManager: ObservableObject {
         downloadTasks[gallery.id] = nil
     }
 
+    /// 章節型來源（漫畫人/漫畫櫃）的書籤整本下載：取章節列表，逐章 downloadChapter
+    private func performChapterBasedDownload(gallery: Gallery) async {
+        dlog("performChapterBasedDownload START \(gallery.id)")
+        do {
+            let chapters: [Chapter]
+            switch gallery.sourceID {
+            case .manhuagui: chapters = try await ManhuaguiService.shared.fetchChapters(comicURL: gallery.galleryURL)
+            case .manhuaren: chapters = try await ManhuarenService.shared.fetchChapters(galleryURL: gallery.galleryURL)
+            default: chapters = []
+            }
+            guard !chapters.isEmpty else {
+                await MainActor.run { states[gallery.id] = .failed("無章節") }
+                return
+            }
+            await MainActor.run { states[gallery.id] = .downloading(page: 0, total: chapters.count) }
+            for (i, ch) in chapters.enumerated() {
+                if Task.isCancelled { break }
+                if isChapterDownloaded(chapter: ch, gallery: gallery) { continue }
+                await MainActor.run { states[gallery.id] = .downloading(page: i + 1, total: chapters.count) }
+                downloadChapter(chapter: ch, gallery: gallery)
+            }
+            await MainActor.run { states[gallery.id] = .completed }
+        } catch is CancellationError {
+            await MainActor.run { states[gallery.id] = .notDownloaded }
+        } catch {
+            dlog("  FAILED \(gallery.id): \(error)")
+            await MainActor.run { states[gallery.id] = .failed(error.localizedDescription) }
+        }
+        downloadTasks[gallery.id] = nil
+    }
+
     private func performChapterDownload(chapter: Chapter, gallery: Gallery) async {
         let key = chapter.url.absoluteString
         dlog("performChapterDownload START \(chapter.id) '\(chapter.title)'")
 
         do {
-            let imageURLs = try await ManhuaguiService.shared.fetchChapterImages(chapterURL: chapter.url)
+            let imageURLs: [URL]
+            switch gallery.sourceID {
+            case .manhuagui: imageURLs = try await ManhuaguiService.shared.fetchChapterImages(chapterURL: chapter.url)
+            case .manhuaren: imageURLs = try await ManhuarenService.shared.fetchChapterImages(chapterURL: chapter.url)
+            default: throw DownloadError.noImages
+            }
             let total = imageURLs.count
             guard total > 0 else { throw DownloadError.noImages }
 
@@ -362,8 +406,14 @@ final class DownloadManager: ObservableObject {
                 var lastError: Error?
                 for attempt in 1...3 {
                     do {
+                        let referer: String
+                        switch gallery.sourceID {
+                        case .manhuaren:  referer = "https://www.manhuaren.com/"
+                        case .eightcomic: referer = "https://www.8comic.com/"
+                        default:          referer = "https://tw.manhuagui.com"
+                        }
                         let data = try await EHentaiService.shared.fetchImageData(
-                            url: imageURL, referer: "https://tw.manhuagui.com")
+                            url: imageURL, referer: referer)
                         let ext = imageURL.pathExtension.isEmpty ? "jpg" : imageURL.pathExtension
                         try data.write(to: imageFile(stagingDir: stagingDir, index: i, ext: ext))
                         lastError = nil; break
@@ -411,6 +461,18 @@ final class DownloadManager: ObservableObject {
     }
 
     // MARK: - Local Reading
+
+    /// 直接從 CBZ 路徑解壓（Library 模式用）
+    func extractedImageURLs(fromCBZ cbz: URL) async throws -> [URL] {
+        let safeID = cbz.deletingPathExtension().lastPathComponent
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("comic_lib_\(safeID)")
+        if FileManager.default.fileExists(atPath: tempDir.path) {
+            return sortedImageURLs(in: tempDir)
+        }
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        return try await unzipImages(cbz: cbz, to: tempDir)
+    }
 
     func extractedImageURLs(for chapter: Chapter, gallery: Gallery) async throws -> [URL] {
         guard let cbz = chapterCBZURL(chapter: chapter, gallery: gallery) else {

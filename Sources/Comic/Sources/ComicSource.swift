@@ -49,11 +49,14 @@ final class SourceManager: ObservableObject {
         didSet { UserDefaults.standard.set(activeSourceID.rawValue, forKey: "activeSource") }
     }
 
-    var activeSource: ComicSource {
-        switch activeSourceID {
-        case .ehentai:   return EHentaiSource.shared
-        case .manhuagui: return ManhuaguiSource.shared
-        case .manhuaren: return ManhuarenSource.shared
+    var activeSource: ComicSource { source(for: activeSourceID) }
+
+    func source(for id: SourceID) -> ComicSource {
+        switch id {
+        case .ehentai:    return EHentaiSource.shared
+        case .manhuagui:  return ManhuaguiSource.shared
+        case .manhuaren:  return ManhuarenSource.shared
+        case .eightcomic: return EightcomicSource.shared
         }
     }
 

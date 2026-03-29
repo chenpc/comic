@@ -24,21 +24,88 @@ final class ManhuarenService {
     // MARK: - 列表 / 搜尋
 
     func fetchComicList(page: Int, search: String, slug: String) async throws -> (galleries: [Gallery], totalPages: Int) {
-        let url: URL
         if !search.isEmpty {
-            let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? search
-            url = URL(string: "\(base)/search/?title=\(encoded)&language=1&page=\(page)")!
-        } else if slug.isEmpty {
-            url = URL(string: "\(base)/manhua-list/?page=\(page)")!
-        } else {
-            url = URL(string: "\(base)/\(slug)/?page=\(page)")!
+            return try await fetchSearch(page: page, search: search)
         }
-        log.info("fetchComicList url=\(url)")
+        if page == 1 {
+            // 第一頁：直接 GET 分類/列表頁（HTML 已含 21 筆）
+            let pageURL = slug.isEmpty
+                ? URL(string: "\(base)/manhua-list/")!
+                : URL(string: "\(base)/\(slug)/")!
+            log.info("fetchComicList page=1 url=\(pageURL)")
+            let html = try await fetchHTML(url: pageURL)
+            // 從 HTML 取 JS 變數作為 AJAX 參數
+            ajaxParams = parseAJAXParams(from: html, slug: slug)
+            let galleries = parseGalleryList(from: html)
+            return (galleries, galleries.isEmpty ? 1 : page + 1)
+        } else {
+            // page > 1：用 AJAX API
+            return try await fetchAJAXPage(page: page)
+        }
+    }
+
+    /// 儲存第一頁解析到的 AJAX 參數，供後續頁使用
+    private var ajaxParams: [String: String] = [:]
+
+    private func fetchSearch(page: Int, search: String) async throws -> ([Gallery], Int) {
+        let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? search
+        let url = URL(string: "\(base)/search/?title=\(encoded)&language=1&page=\(page)")!
+        log.info("fetchSearch url=\(url)")
         let html = try await fetchHTML(url: url)
         let galleries = parseGalleryList(from: html)
-        // 網站無明確 totalPages，有結果就繼續，空了就停
-        let totalPages = galleries.isEmpty ? page : page + 1
-        return (galleries, totalPages)
+        return (galleries, galleries.isEmpty ? page : page + 1)
+    }
+
+    private func fetchAJAXPage(page: Int) async throws -> ([Gallery], Int) {
+        var req = URLRequest(url: URL(string: "\(base)/dm5.ashx?d=\(Date().timeIntervalSince1970)")!)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        var params = ajaxParams
+        params["action"] = "getclasscomics"
+        params["pageindex"] = "\(page)"
+        params["pagesize"] = "21"
+        let body = params.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+        req.httpBody = body.data(using: .utf8)
+        log.info("fetchAJAXPage page=\(page) params=\(params)")
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw MHRError.badResponse
+        }
+        let galleries = try parseAJAXResponse(data: data)
+        return (galleries, galleries.isEmpty ? page : page + 1)
+    }
+
+    func parseAJAXParams(from html: String, slug: String) -> [String: String] {
+        var params: [String: String] = [
+            "categoryid": "0", "tagid": "0", "status": "0",
+            "usergroup": "0", "pay": "-1", "areaid": "0",
+            "sort": "10", "iscopyright": "0"
+        ]
+        for key in ["categoryid", "tagid", "status", "usergroup", "pay", "areaid", "sort"] {
+            if let v = parseJSVar(key, from: html) { params[key] = v }
+        }
+        if let copy = parseJSVar("iscopyright", from: html) {
+            params["iscopyright"] = copy.lowercased() == "true" ? "1" : "0"
+        }
+        return params
+    }
+
+    func parseAJAXResponse(data: Data) throws -> [Gallery] {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["UpdateComicItems"] as? [[String: Any]] else {
+            throw MHRError.parseError
+        }
+        return items.compactMap { item in
+            guard let key   = item["UrlKey"]       as? String,
+                  let title = item["Title"]        as? String else { return nil }
+            let thumb = (item["ShowPicUrlB"] as? String).flatMap(URL.init)
+            let gURL  = URL(string: "\(base)/\(key)/")!
+            return Gallery(id: key, token: key, title: title.mhrHTMLDecoded(),
+                           thumbURL: thumb, pageCount: nil, category: nil,
+                           uploader: nil, source: SourceID.manhuaren.rawValue,
+                           galleryURL: gURL)
+        }
     }
 
     // MARK: - 章節列表
@@ -149,7 +216,8 @@ final class ManhuarenService {
 
     func extractImages(from html: String) throws -> [URL] {
         // 找包含 newImgs 的 <script> 標籤（可能是 packer 或明文）
-        let scriptPattern = #"<script[^>]*>\s*((?:eval\(function|var\s+newImgs)[^<]+)\s*</script>"#
+        // 注意：packed JS 本身含有 < 字元（如 c<a），所以不能用 [^<]+ 而要用 .*?
+        let scriptPattern = #"<script[^>]*>\s*((?:eval\(function|var\s+newImgs).*?)\s*</script>"#
         guard let regex = try? NSRegularExpression(pattern: scriptPattern, options: .dotMatchesLineSeparators),
               let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let r = Range(m.range(at: 1), in: html) else {

@@ -189,6 +189,14 @@ struct GalleryListView: View {
                         ForEach(vm.galleries) { gallery in
                             GalleryCard(gallery: gallery)
                                 .onTapGesture { onSelect(gallery) }
+                                .contextMenu {
+                                    Button {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(gallery.galleryURL.absoluteString, forType: .string)
+                                    } label: {
+                                        Label("複製漫畫連結", systemImage: "link")
+                                    }
+                                }
                         }
                     }
                     .padding(10)

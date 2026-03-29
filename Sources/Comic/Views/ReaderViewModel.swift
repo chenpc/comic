@@ -86,6 +86,25 @@ final class ReaderViewModel: ObservableObject {
         directImageURLs = []
         imageURLCache = [:]
 
+        // Library 模式：chapter.url 直接是本地 CBZ 路徑
+        if chapter.url.isFileURL && chapter.url.pathExtension.lowercased() == "cbz" {
+            print("[Library] loadChapter local CBZ: \(chapter.url.path)")
+            do {
+                localImageURLs = try await DownloadManager.shared.extractedImageURLs(fromCBZ: chapter.url)
+                totalPages = localImageURLs.count
+                isLocalFile = true
+                isLoadingGallery = false
+                if !localImageURLs.isEmpty {
+                    await navigate(to: min(startPage, totalPages - 1))
+                }
+                return
+            } catch {
+                self.error = error.localizedDescription
+                isLoadingGallery = false
+                return
+            }
+        }
+
         // 優先讀本地已下載的章節 CBZ
         if let gallery = currentGallery,
            DownloadManager.shared.isChapterDownloaded(chapter: chapter, gallery: gallery) {
@@ -104,7 +123,8 @@ final class ReaderViewModel: ObservableObject {
 
         isLocalFile = false
         do {
-            let urls = try await ManhuaguiSource.shared.fetchImageURLs(url: chapter.url)
+            let sourceID = currentGallery?.sourceID ?? .manhuagui
+            let urls = try await SourceManager.shared.source(for: sourceID).fetchImageURLs(url: chapter.url)
             directImageURLs = urls
             totalPages = urls.count
             isLoadingGallery = false
@@ -165,12 +185,25 @@ final class ReaderViewModel: ObservableObject {
 
     func nextChapterInList() -> Chapter? {
         guard !allChapters.isEmpty, let currentURL = currentChapterURL else { return nil }
-        return ManhuaguiService.shared.findNextChapter(in: allChapters, currentURL: currentURL)
+        if currentGallery?.sourceID == .manhuagui {
+            return ManhuaguiService.shared.findNextChapter(in: allChapters, currentURL: currentURL)
+        }
+        guard let idx = allChapters.firstIndex(where: { $0.url == currentURL }) else { return nil }
+        let current = allChapters[idx]
+        if let next = allChapters.adjacentChapter(after: current) { return next }
+        // 回退：直接用 index + 1
+        return idx + 1 < allChapters.count ? allChapters[idx + 1] : nil
     }
 
     func prevChapterInList() -> Chapter? {
         guard !allChapters.isEmpty, let currentURL = currentChapterURL else { return nil }
-        return ManhuaguiService.shared.findPrevChapter(in: allChapters, currentURL: currentURL)
+        if currentGallery?.sourceID == .manhuagui {
+            return ManhuaguiService.shared.findPrevChapter(in: allChapters, currentURL: currentURL)
+        }
+        guard let idx = allChapters.firstIndex(where: { $0.url == currentURL }) else { return nil }
+        let current = allChapters[idx]
+        if let prev = allChapters.adjacentChapter(before: current) { return prev }
+        return idx - 1 >= 0 ? allChapters[idx - 1] : nil
     }
 
     // MARK: - Private
@@ -185,8 +218,7 @@ final class ReaderViewModel: ObservableObject {
             if isLocalFile {
                 img = try await loadLocalImage(at: index)
             } else if !directImageURLs.isEmpty {
-                img = await ImageLoader.shared.image(for: directImageURLs[index],
-                                                     referer: "https://tw.manhuagui.com")
+                img = await ImageLoader.shared.image(for: directImageURLs[index], referer: imageReferer)
             } else {
                 let imageURL = try await resolveImageURL(at: index)
                 img = await ImageLoader.shared.image(for: imageURL)
@@ -244,11 +276,11 @@ final class ReaderViewModel: ObservableObject {
                 }
             }
         } else if !directImageURLs.isEmpty {
+            let referer = imageReferer
             Task {
                 let end = min(index + 1 + count, directImageURLs.count)
                 for i in (index + 1)..<end {
-                    await ImageLoader.shared.prefetch(url: directImageURLs[i],
-                                                      referer: "https://tw.manhuagui.com")
+                    await ImageLoader.shared.prefetch(url: directImageURLs[i], referer: referer)
                 }
                 let remaining = count - (end - index - 1)
                 if remaining > 0, let next = nextChapterInList() {
@@ -276,9 +308,18 @@ final class ReaderViewModel: ObservableObject {
 
     /// 預讀下一集的前 N 張圖
     private func prefetchNextChapter(_ chapter: Chapter, count: Int) async {
-        guard let urls = try? await ManhuaguiSource.shared.fetchImageURLs(url: chapter.url) else { return }
+        let sourceID = currentGallery?.sourceID ?? .manhuagui
+        guard let urls = try? await SourceManager.shared.source(for: sourceID).fetchImageURLs(url: chapter.url) else { return }
         for url in urls.prefix(count) {
-            await ImageLoader.shared.prefetch(url: url, referer: "https://tw.manhuagui.com")
+            await ImageLoader.shared.prefetch(url: url, referer: imageReferer)
+        }
+    }
+
+    private var imageReferer: String {
+        switch currentGallery?.sourceID {
+        case .manhuaren:  return "https://www.manhuaren.com/"
+        case .eightcomic: return "https://www.8comic.com/"
+        default:          return "https://tw.manhuagui.com"
         }
     }
 }
