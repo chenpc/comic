@@ -224,6 +224,39 @@ final class ManhuarenParseChaptersTests: XCTestCase {
         let chapters = svc.parseChapters(from: newFormatHTML)
         XCTAssertEqual(chapters.first?.url.absoluteString, "https://www.manhuaren.com/m426475/")
     }
+
+    // 付費章節：含 detail-list-2-info-right 鎖頭圖示，標題應加 "$$ " 前綴
+    private let paidChapterHTML = """
+    <a href="/m1768649/" class="chapteritem">
+        <div class="detail-list-2-info">
+            <p class="detail-list-2-info-title">第515回 新对手（上）</p>
+            <img class="detail-list-2-info-right" src="https://css123hk.cdndm5.com/v202508200911/manhuaren/images/mobile/detail-list-logo-right.png">
+        </div>
+    </a>
+    <a href="/m426475/" class="chapteritem">
+        <div class="detail-list-2-info">
+            <p class="detail-list-2-info-title">第1回 重生</p>
+        </div>
+    </a>
+    """
+
+    func test_parseChapters_paidChapter_hasPrefix() {
+        let chapters = svc.parseChapters(from: paidChapterHTML)
+        // 付費章節（m1768649）在頁面前，反轉後在最後
+        XCTAssertTrue(chapters.last?.title.hasPrefix("$$ ") == true,
+                      "付費章節標題應有 '$$ ' 前綴，實際: \(chapters.last?.title ?? "")")
+    }
+
+    func test_parseChapters_freeChapter_noPrefix() {
+        let chapters = svc.parseChapters(from: paidChapterHTML)
+        XCTAssertFalse(chapters.first?.title.hasPrefix("$$ ") == true,
+                       "免費章節不應有 '$$ ' 前綴")
+    }
+
+    func test_parseChapters_paidChapter_titleContent() {
+        let chapters = svc.parseChapters(from: paidChapterHTML)
+        XCTAssertEqual(chapters.last?.title, "$$ 第515回 新对手（上）")
+    }
 }
 
 // MARK: - 章節圖片 JS Packer 解碼測試

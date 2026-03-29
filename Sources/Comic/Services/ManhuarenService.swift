@@ -208,7 +208,7 @@ final class ManhuarenService {
             let cid   = String(html[r2])
             let block = String(html[r3])
             // 先嘗試從 detail-list-2-info-title 取標題，找不到則直接用 block 文字
-            let title: String
+            var title: String
             let blockNS = NSRange(block.startIndex..., in: block)
             if let tm = titleRegex?.firstMatch(in: block, range: blockNS),
                let tr = Range(tm.range(at: 1), in: block) {
@@ -218,6 +218,10 @@ final class ManhuarenService {
                     .mhrHTMLDecoded().trimmingCharacters(in: .whitespacesAndNewlines)
             }
             guard !title.isEmpty else { continue }
+            // 付費鎖定章節：含有 detail-list-2-info-right 鎖頭圖示
+            if block.contains("detail-list-2-info-right") {
+                title = "$$ " + title
+            }
             let url = URL(string: "\(base)\(path)")!
             chapters.append(Chapter(id: cid, title: title, url: url, pageCount: nil))
         }
