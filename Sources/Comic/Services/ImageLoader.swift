@@ -76,6 +76,16 @@ actor ImageLoader {
         memoryCache.removeAllObjects()
     }
 
+    /// 確認所有 URL 的圖片都已在磁碟快取
+    func allDiskCached(urls: [URL]) -> Bool {
+        urls.allSatisfy { diskFileExists(key: cacheKey(for: $0)) }
+    }
+
+    /// 從磁碟快取讀取原始 data（供 auto-CBZ 打包使用）
+    func readFromDisk(url: URL) -> Data? {
+        try? Data(contentsOf: diskPath(key: cacheKey(for: url)))
+    }
+
     /// 清除磁碟快取（同時清記憶體）
     func clearDiskCache() {
         memoryCache.removeAllObjects()

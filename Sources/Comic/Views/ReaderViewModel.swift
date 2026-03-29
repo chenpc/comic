@@ -26,6 +26,9 @@ final class ReaderViewModel: ObservableObject {
     private var currentChapterURL: URL?
     private var currentChapter: Chapter?
 
+    // 自動打包：記錄已看過的頁面 index
+    private var viewedPages: Set<Int> = []
+
     // MARK: - Gallery Loading
 
     func loadGallery(_ gallery: Gallery) async {
@@ -39,6 +42,7 @@ final class ReaderViewModel: ObservableObject {
         localImageURLs = []
         directImageURLs = []
         imageURLCache = [:]
+        viewedPages = []
 
         // 優先讀本地 CBZ
         if DownloadManager.shared.isDownloaded(gallery) {
@@ -85,6 +89,7 @@ final class ReaderViewModel: ObservableObject {
         localImageURLs = []
         directImageURLs = []
         imageURLCache = [:]
+        viewedPages = []
 
         // Library 模式：chapter.url 直接是本地 CBZ 路徑
         if chapter.url.isFileURL && chapter.url.pathExtension.lowercased() == "cbz" {
@@ -232,6 +237,13 @@ final class ReaderViewModel: ObservableObject {
             if let g = currentGallery, let ch = currentChapter {
                 ReadingProgressStore.shared.record(gallery: g, chapter: ch, pageIndex: index)
             }
+            // 追蹤已看頁面，全部看完後觸發自動打包
+            if !isLocalFile, img != nil, !directImageURLs.isEmpty {
+                viewedPages.insert(index)
+                if viewedPages.count == totalPages {
+                    triggerAutoCacheToCBZ()
+                }
+            }
         } catch {
             if currentIndex == index {
                 self.error = error.localizedDescription
@@ -259,6 +271,18 @@ final class ReaderViewModel: ObservableObject {
         let url = try await EHentaiService.shared.fetchImageURL(pageURL: pageURL)
         imageURLCache[pageURL] = url
         return url
+    }
+
+    private func triggerAutoCacheToCBZ() {
+        guard let gallery = currentGallery,
+              let chapter = currentChapter,
+              BookmarkStore.shared.isBookmarked(gallery) else { return }
+        let urls = directImageURLs
+        let ch = chapter
+        let g = gallery
+        Task {
+            await DownloadManager.shared.autoCacheToCBZ(chapter: ch, gallery: g, imageURLs: urls)
+        }
     }
 
     private func prefetchAhead(from index: Int) {

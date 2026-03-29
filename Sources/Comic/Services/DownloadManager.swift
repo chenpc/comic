@@ -214,6 +214,55 @@ final class DownloadManager: ObservableObject {
         chapterDownloadTasks[key] = task
     }
 
+    /// 瀏覽完一章後，從磁碟快取打包 CBZ（不重新下載）
+    func autoCacheToCBZ(chapter: Chapter, gallery: Gallery, imageURLs: [URL]) async {
+        guard SettingsStore.shared.libraryURL != nil else { return }
+        guard !imageURLs.isEmpty else { return }
+        guard !isChapterDownloaded(chapter: chapter, gallery: gallery) else { return }
+
+        let key = chapter.url.absoluteString
+        // 避免重複執行
+        if let s = chapterStates[key], s.isActive || s == .completed { return }
+
+        // 確認所有圖片都已在磁碟快取
+        let allCached = await ImageLoader.shared.allDiskCached(urls: imageURLs)
+        guard allCached else {
+            dlog("autoCacheToCBZ: skip \(chapter.title) – not all cached (\(imageURLs.count) pages)")
+            return
+        }
+
+        dlog("autoCacheToCBZ: START \(chapter.title)")
+        chapterStates[key] = .packaging
+
+        do {
+            guard let folder = comicFolder(for: gallery) else { throw DownloadError.noImages }
+            let stagingDir = folder.appendingPathComponent(".staging_auto_\(chapter.id)")
+            try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+            // 從磁碟快取逐張複製，保留原始格式
+            for (i, url) in imageURLs.enumerated() {
+                guard let data = await ImageLoader.shared.readFromDisk(url: url) else {
+                    dlog("autoCacheToCBZ: missing disk cache at index \(i)")
+                    try? FileManager.default.removeItem(at: stagingDir)
+                    chapterStates[key] = .notDownloaded
+                    return
+                }
+                let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
+                try data.write(to: imageFile(stagingDir: stagingDir, index: i, ext: ext))
+            }
+
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let cbzDest = folder.appendingPathComponent("\(safeFilename(chapter.title)).cbz")
+            try await packageAsCBZ(sourceDir: stagingDir, destination: cbzDest)
+            try? FileManager.default.removeItem(at: stagingDir)
+            chapterStates[key] = .completed
+            dlog("autoCacheToCBZ: COMPLETED \(chapter.title)")
+        } catch {
+            dlog("autoCacheToCBZ: FAILED \(error)")
+            chapterStates[key] = .notDownloaded
+        }
+    }
+
     func cancelChapterDownload(chapter: Chapter) {
         let key = chapter.url.absoluteString
         chapterDownloadTasks[key]?.cancel()
