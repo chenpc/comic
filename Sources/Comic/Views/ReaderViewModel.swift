@@ -1,5 +1,8 @@
 import AppKit
 import SwiftUI
+import os.log
+
+private let rlog = Logger(subsystem: "com.chenpc.comic", category: "AutoCBZ")
 
 @MainActor
 final class ReaderViewModel: ObservableObject {
@@ -237,11 +240,13 @@ final class ReaderViewModel: ObservableObject {
             if let g = currentGallery, let ch = currentChapter {
                 ReadingProgressStore.shared.record(gallery: g, chapter: ch, pageIndex: index)
             }
-            // 追蹤已看頁面，全部看完後觸發自動打包
+            // 到達最後一頁時嘗試觸發自動打包（prefetch 已提前快取後面的頁）
             if !isLocalFile, img != nil, !directImageURLs.isEmpty {
                 viewedPages.insert(index)
-                if viewedPages.count == totalPages {
-                    triggerAutoCacheToCBZ()
+                rlog.debug("viewedPages \(self.viewedPages.count)/\(self.totalPages) idx=\(index)")
+                if index == totalPages - 1 {
+                    rlog.info("reached last page, scheduling auto-CBZ check")
+                    scheduleAutoCBZCheck()
                 }
             }
         } catch {
@@ -273,15 +278,34 @@ final class ReaderViewModel: ObservableObject {
         return url
     }
 
-    private func triggerAutoCacheToCBZ() {
-        guard let gallery = currentGallery,
-              let chapter = currentChapter,
-              BookmarkStore.shared.isBookmarked(gallery) else { return }
+    /// 到達最後一頁後，等待 prefetch 完成，再確認全部快取後打包
+    private func scheduleAutoCBZCheck() {
+        guard let gallery = currentGallery else {
+            rlog.warning("scheduleAutoCBZCheck: no currentGallery"); return
+        }
+        guard let chapter = currentChapter else {
+            rlog.warning("scheduleAutoCBZCheck: no currentChapter"); return
+        }
+        guard BookmarkStore.shared.isBookmarked(gallery) else {
+            rlog.info("scheduleAutoCBZCheck: skip – not bookmarked (\(gallery.title))"); return
+        }
+        rlog.info("scheduleAutoCBZCheck: \(chapter.title) urls=\(self.directImageURLs.count)")
         let urls = directImageURLs
         let ch = chapter
         let g = gallery
         Task {
-            await DownloadManager.shared.autoCacheToCBZ(chapter: ch, gallery: g, imageURLs: urls)
+            // 等待最多 30 秒讓 prefetch 完成
+            for attempt in 1...6 {
+                let allCached = await ImageLoader.shared.allDiskCached(urls: urls)
+                rlog.info("scheduleAutoCBZCheck attempt \(attempt): allCached=\(allCached)")
+                if allCached {
+                    await DownloadManager.shared.autoCacheToCBZ(chapter: ch, gallery: g, imageURLs: urls)
+                    return
+                }
+                // 等 5 秒後重試
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            rlog.warning("scheduleAutoCBZCheck: gave up waiting for full cache")
         }
     }
 

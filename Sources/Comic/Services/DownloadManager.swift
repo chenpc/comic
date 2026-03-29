@@ -222,7 +222,7 @@ final class DownloadManager: ObservableObject {
 
         let key = chapter.url.absoluteString
         // 避免重複執行
-        if let s = chapterStates[key], s.isActive || s == .completed { return }
+        if let s = chapterStates[key], s.isActive || s == .completed || s == .packaging { return }
 
         // 確認所有圖片都已在磁碟快取
         let allCached = await ImageLoader.shared.allDiskCached(urls: imageURLs)
