@@ -221,7 +221,7 @@ final class ReaderViewModel: ObservableObject {
                 img = await ImageLoader.shared.image(for: directImageURLs[index], referer: imageReferer)
             } else {
                 let imageURL = try await resolveImageURL(at: index)
-                img = await ImageLoader.shared.image(for: imageURL)
+                img = await ImageLoader.shared.image(for: imageURL, referer: "https://e-hentai.org")
             }
 
             guard currentIndex == index else { return }

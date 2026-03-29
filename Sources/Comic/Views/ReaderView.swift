@@ -9,11 +9,9 @@ struct ReaderView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // 圖片顯示（自動 fit 螢幕）
+            // 圖片顯示（自動 fit 螢幕，支援 animated WebP / GIF）
             if let image = vm.currentImage {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
+                AnimatingImageView(image: image)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.15), value: vm.currentIndex)
@@ -141,6 +139,26 @@ struct ReaderView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .allowsHitTesting(false)
+        }
+    }
+}
+
+// MARK: - 動圖顯示（支援 animated WebP / GIF）
+
+struct AnimatingImageView: NSViewRepresentable {
+    let image: NSImage
+
+    func makeNSView(context: Context) -> NSImageView {
+        let view = NSImageView()
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.animates = true
+        view.image = image
+        return view
+    }
+
+    func updateNSView(_ nsView: NSImageView, context: Context) {
+        if nsView.image !== image {
+            nsView.image = image
         }
     }
 }
