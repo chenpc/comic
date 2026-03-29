@@ -181,6 +181,49 @@ final class ManhuarenParseChaptersTests: XCTestCase {
         let chapters = svc.parseChapters(from: html)
         XCTAssertEqual(chapters.count, 1)
     }
+
+    // 新版格式：標題在 <p class="detail-list-2-info-title"> 裡（如妖神記）
+    // 真實頁面倒序（最新在前）
+    private let newFormatHTML = """
+    <a href="/m426477/" class="chapteritem">
+        <div class="detail-list-2-cover">
+            <img class="detail-list-2-cover-img" src="https://example.com/cover2.jpg">
+        </div>
+        <div class="detail-list-2-info">
+            <p class="detail-list-2-info-title">第2回 魔法</p>
+        </div>
+    </a>
+    <a href="/m426475/" class="chapteritem">
+        <div class="detail-list-2-cover">
+            <img class="detail-list-2-cover-img" src="https://example.com/cover.jpg">
+        </div>
+        <div class="detail-list-2-info">
+            <p class="detail-list-2-info-title">第1回 重生</p>
+            <p class="detail-list-2-info-subtitle">2016-11-11</p>
+        </div>
+    </a>
+    """
+
+    func test_parseChapters_newFormat_count() {
+        let chapters = svc.parseChapters(from: newFormatHTML)
+        XCTAssertEqual(chapters.count, 2)
+    }
+
+    func test_parseChapters_newFormat_title() {
+        let chapters = svc.parseChapters(from: newFormatHTML)
+        // 頁面倒序，反轉後第一章應為 "第1回 重生"
+        XCTAssertEqual(chapters.first?.title, "第1回 重生")
+    }
+
+    func test_parseChapters_newFormat_id() {
+        let chapters = svc.parseChapters(from: newFormatHTML)
+        XCTAssertEqual(chapters.first?.id, "426475")
+    }
+
+    func test_parseChapters_newFormat_url() {
+        let chapters = svc.parseChapters(from: newFormatHTML)
+        XCTAssertEqual(chapters.first?.url.absoluteString, "https://www.manhuaren.com/m426475/")
+    }
 }
 
 // MARK: - 章節圖片 JS Packer 解碼測試

@@ -193,9 +193,11 @@ final class ManhuarenService {
     // MARK: - 解析：章節
 
     func parseChapters(from html: String) -> [Chapter] {
-        // <a href="/m{id}/" title="..." class="chapteritem">第xxx话</a>
-        let pattern = #"href="(/m(\d+)/)"[^>]*class="chapteritem"[^>]*>([^<]+)</a>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        // 結構1（新版）：<a href="/m{id}/" class="chapteritem">...<p class="detail-list-2-info-title">{title}</p>...</a>
+        // 結構2（舊版）：<a href="/m{id}/" class="chapteritem">{title}</a>
+        let blockPattern = #"<a\s+href="(/m(\d+)/)"[^>]*class="chapteritem"[^>]*>([\s\S]*?)</a>"#
+        guard let regex = try? NSRegularExpression(pattern: blockPattern) else { return [] }
+        let titleRegex = try? NSRegularExpression(pattern: #"detail-list-2-info-title">([^<]+)<"#)
         let range = NSRange(html.startIndex..., in: html)
         var chapters: [Chapter] = []
         for m in regex.matches(in: html, range: range) {
@@ -204,8 +206,19 @@ final class ManhuarenService {
                   let r3 = Range(m.range(at: 3), in: html) else { continue }
             let path  = String(html[r1])
             let cid   = String(html[r2])
-            let title = String(html[r3]).mhrHTMLDecoded().trimmingCharacters(in: .whitespaces)
-            let url   = URL(string: "\(base)\(path)")!
+            let block = String(html[r3])
+            // 先嘗試從 detail-list-2-info-title 取標題，找不到則直接用 block 文字
+            let title: String
+            let blockNS = NSRange(block.startIndex..., in: block)
+            if let tm = titleRegex?.firstMatch(in: block, range: blockNS),
+               let tr = Range(tm.range(at: 1), in: block) {
+                title = String(block[tr]).mhrHTMLDecoded().trimmingCharacters(in: .whitespaces)
+            } else {
+                title = block.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                    .mhrHTMLDecoded().trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !title.isEmpty else { continue }
+            let url = URL(string: "\(base)\(path)")!
             chapters.append(Chapter(id: cid, title: title, url: url, pageCount: nil))
         }
         // 頁面是倒序（最新在前），反轉為正序
