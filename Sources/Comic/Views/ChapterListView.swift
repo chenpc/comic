@@ -4,8 +4,10 @@ struct ChapterListView: View {
     let gallery: Gallery
     let onSelect: (Chapter, [Chapter], Int) -> Void   // Chapter, allChapters, startPage
     let onBack: () -> Void
+    var onAuthorTap: ((String) -> Void)? = nil
 
     @State private var chapters: [Chapter] = []
+    @State private var detail: GalleryDetail? = nil
     @State private var isLoading = true
     @State private var error: String?
     @ObservedObject private var downloads = DownloadManager.shared
@@ -30,6 +32,12 @@ struct ChapterListView: View {
         return max(0, chapters.count - downloaded)
     }
 
+    private var hasActiveChapterDownloads: Bool {
+        chapters.contains {
+            (downloads.chapterStates[$0.url.absoluteString] ?? .notDownloaded).isActive
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // 標題列
@@ -51,6 +59,12 @@ struct ChapterListView: View {
             .background(Color(NSColor.windowBackgroundColor))
 
             Divider()
+
+            // 作者 / 簡介（manhuaren 才有）
+            if let d = detail, d.author != nil || d.description != nil {
+                galleryDetailSection(d)
+                Divider()
+            }
 
             if !isLoading, !chapters.isEmpty {
                 // 繼續閱讀 Banner
@@ -96,6 +110,7 @@ struct ChapterListView: View {
             }
         }
         .task { await load() }
+        .onAppear { ChapterUpdateStore.shared.markSeen(galleryID: gallery.id) }
     }
 
     // MARK: - Sub views
@@ -137,6 +152,13 @@ struct ChapterListView: View {
             Text("有 \(undownloadedCount) 集尚未下載（共 \(chapters.count) 集）")
                 .font(.system(size: 12)).foregroundColor(.secondary)
             Spacer()
+            if hasActiveChapterDownloads {
+                Button("全部暫停") {
+                    downloads.pauseAllChapterDownloads(chapters: chapters)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
             Button("全部下載") {
                 for ch in chapters { downloads.downloadChapter(chapter: ch, gallery: gallery) }
             }
@@ -151,12 +173,52 @@ struct ChapterListView: View {
     private func load() async {
         isLoading = true
         error = nil
+        let source = SourceManager.shared.source(for: gallery.sourceID)
+        async let chaptersTask = source.fetchChapters(gallery: gallery)
+        async let detailTask   = source.fetchGalleryDetail(gallery: gallery)
         do {
-            chapters = try await SourceManager.shared.source(for: gallery.sourceID).fetchChapters(gallery: gallery)
+            chapters = try await chaptersTask
         } catch {
             self.error = error.localizedDescription
         }
+        detail = await detailTask
         isLoading = false
+    }
+
+    @ViewBuilder
+    private func galleryDetailSection(_ d: GalleryDetail) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let author = d.author {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Text("作者：")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    if let tap = onAuthorTap {
+                        Button(author) { tap(author) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.accentColor)
+                    } else {
+                        Text(author)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                }
+            }
+            if let desc = d.description {
+                Text(desc)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
     }
 }
 
@@ -225,13 +287,18 @@ private struct ChapterRow: View {
                 Image(systemName: "arrow.down.circle").foregroundColor(.secondary)
             }.buttonStyle(.plain)
         case .queued:
-            Image(systemName: "clock").foregroundColor(.secondary).font(.system(size: 14))
+            Button { downloads.pauseChapterDownload(chapter: chapter) } label: {
+                Image(systemName: "pause.circle").foregroundColor(.secondary)
+            }.buttonStyle(.plain)
         case .downloading(let p, let t):
             HStack(spacing: 4) {
                 if t > 0 {
                     Text("\(p)/\(t)").font(.system(size: 10)).foregroundColor(.secondary)
                 }
                 ProgressView().scaleEffect(0.6).frame(width: 18, height: 18)
+                Button { downloads.pauseChapterDownload(chapter: chapter) } label: {
+                    Image(systemName: "pause.circle").foregroundColor(.secondary)
+                }.buttonStyle(.plain)
             }
         case .packaging:
             ProgressView().scaleEffect(0.6).frame(width: 18, height: 18)

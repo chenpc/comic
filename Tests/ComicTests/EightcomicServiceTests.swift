@@ -118,7 +118,7 @@ final class EightcomicDecryptBasicTests: XCTestCase {
         } catch {
             // 預期 throw（資料無效），但必須不是「找不到變數」之前就 throw
             // 如果邏輯正確，error 為 EC8Error.parseError（章節記錄無效）
-            XCTAssertTrue(error.localizedDescription.contains("8comic"))
+            XCTAssertNotNil(error as? ComicServiceError)
         }
     }
 
@@ -128,7 +128,7 @@ final class EightcomicDecryptBasicTests: XCTestCase {
         let html = "<script>var ti=999;var yy1yn34_04='\(fakeData)';</script>"
         let url = URL(string: "https://www.8comic.com/view/999.html?ch=1")!
         XCTAssertThrowsError(try svc.decryptChapterImages(html: html, chapterURL: url)) { err in
-            XCTAssertTrue(err.localizedDescription.contains("8comic"))
+            XCTAssertNotNil(err as? ComicServiceError)
         }
     }
 }

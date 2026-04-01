@@ -8,18 +8,89 @@ struct LibraryView: View {
     /// ehentai 單一 CBZ 直接開閱讀器
     let onSelectChapter: (Chapter, [Chapter], Int, Gallery) -> Void
 
-    @State private var galleries: [Gallery] = []
+    @State private var galleries: [Gallery] = []       // 已按修改時間排序（新→舊）
     @State private var isScanning = false
+    @State private var searchText = ""
+    @State private var selectedSource: SourceID? = nil  // nil = 全部
+    @State private var currentPage = 1
+
+    private let pageSize = 40
+
+    /// 目前 library 中有內容的來源（用於顯示 tabs）
+    private var availableSources: [SourceID] {
+        let ids = Set(galleries.map { $0.sourceID })
+        return SourceID.allCases.filter { ids.contains($0) }
+    }
+
+    private var filteredGalleries: [Gallery] {
+        let bySource = selectedSource == nil ? galleries : galleries.filter { $0.sourceID == selectedSource }
+        return Self.filterGalleries(bySource, query: searchText)
+    }
+
+    private var totalPages: Int { max(1, Int(ceil(Double(filteredGalleries.count) / Double(pageSize)))) }
+
+    private var pagedGalleries: [Gallery] {
+        let start = (currentPage - 1) * pageSize
+        guard start < filteredGalleries.count else { return [] }
+        return Array(filteredGalleries[start..<min(start + pageSize, filteredGalleries.count)])
+    }
+
+    static func filterGalleries(_ galleries: [Gallery], query: String) -> [Gallery] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return galleries }
+        return galleries.filter { $0.title.lowercased().contains(q) }
+    }
 
     var body: some View {
         galleryGridView
             .task { await scan() }
+            .onChange(of: selectedSource) { _, _ in currentPage = 1 }
+            .onChange(of: searchText)    { _, _ in currentPage = 1 }
     }
 
     // MARK: - Gallery Grid
 
     private var galleryGridView: some View {
         VStack(spacing: 0) {
+            // 來源篩選 tabs（有多個來源才顯示）
+            if !galleries.isEmpty && availableSources.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        sourceTab(id: nil, label: "全部")
+                        ForEach(availableSources) { src in
+                            sourceTab(id: src, label: src.displayName)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                }
+                Divider()
+            }
+
+            // 搜尋欄
+            if !galleries.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("搜尋漫畫櫃…", text: $searchText)
+                        .textFieldStyle(.plain)
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+            }
+
             if isScanning {
                 Spacer()
                 ProgressView("掃描 Library…")
@@ -43,8 +114,8 @@ struct LibraryView: View {
                         columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)],
                         spacing: 12
                     ) {
-                        ForEach(galleries) { gallery in
-                            LocalGalleryCard(gallery: gallery) {
+                        ForEach(pagedGalleries) { gallery in
+                            LocalGalleryCard(gallery: gallery, onTap: {
                                 if gallery.sourceID == .ehentai {
                                     let dummyChapter = Chapter(
                                         id: gallery.id,
@@ -56,13 +127,50 @@ struct LibraryView: View {
                                 } else {
                                     onSelectGallery(gallery)
                                 }
-                            }
+                            }, onDelete: {
+                                deleteGallery(gallery)
+                            })
                         }
                     }
                     .padding(12)
                 }
+
+                if totalPages > 1 {
+                    Divider()
+                    LibraryPaginationView(current: $currentPage, total: totalPages)
+                }
             }
         }
+    }
+
+    // MARK: - Source Tab
+
+    private func sourceTab(id: SourceID?, label: String) -> some View {
+        let isActive = selectedSource == id
+        return Button { selectedSource = id } label: {
+            Text(label)
+                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                .foregroundColor(isActive ? .white : .secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(isActive ? Color.accentColor : Color(NSColor.controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color(NSColor.separatorColor), lineWidth: isActive ? 0 : 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Delete
+
+    private func deleteGallery(_ gallery: Gallery) {
+        let fm = FileManager.default
+        if gallery.sourceID == .ehentai {
+            try? fm.removeItem(at: gallery.galleryURL)
+        } else {
+            try? fm.removeItem(at: gallery.galleryURL)
+        }
+        galleries.removeAll { $0.id == gallery.id }
     }
 
     // MARK: - Scan
@@ -74,7 +182,10 @@ struct LibraryView: View {
 
         guard let lib = SettingsStore.shared.libraryURL else { return }
         let fm = FileManager.default
-        var found: [Gallery] = []
+        // (Gallery, modificationDate) 暫存，掃完後排序
+        var found: [(Gallery, Date)] = []
+
+        let dateKeys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey]
 
         // 掃描各來源子目錄
         for sourceID in SourceID.allCases {
@@ -82,32 +193,26 @@ struct LibraryView: View {
             guard fm.fileExists(atPath: sourceDir.path) else { continue }
 
             let items = (try? fm.contentsOfDirectory(
-                at: sourceDir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+                at: sourceDir, includingPropertiesForKeys: dateKeys)) ?? []
 
-            for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            for item in items {
                 let name = item.lastPathComponent
                 if name.hasPrefix(".") { continue }
 
+                let modDate = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+
                 switch sourceID {
                 case .ehentai:
-                    // 單一 CBZ 檔案：{id}.cbz
                     guard item.pathExtension.lowercased() == "cbz" else { continue }
                     let id = item.deletingPathExtension().lastPathComponent
                     let gallery = Gallery(
-                        id: id,
-                        token: id,
-                        title: id,
-                        thumbURL: nil,
-                        pageCount: nil,
-                        category: nil,
-                        uploader: nil,
-                        source: sourceID.rawValue,
-                        galleryURL: item
+                        id: id, token: id, title: id,
+                        thumbURL: nil, pageCount: nil, category: nil, uploader: nil,
+                        source: sourceID.rawValue, galleryURL: item
                     )
-                    found.append(gallery)
+                    found.append((gallery, modDate))
 
                 default:
-                    // 章節資料夾：每個子資料夾是一部漫畫
                     var isDir: ObjCBool = false
                     guard fm.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue else { continue }
                     let cbzCount = ((try? fm.contentsOfDirectory(
@@ -115,22 +220,77 @@ struct LibraryView: View {
                         .filter { $0.pathExtension.lowercased() == "cbz" }.count
                     guard cbzCount > 0 else { continue }
                     let gallery = Gallery(
-                        id: "\(sourceID.rawValue)_\(name)",
-                        token: name,
-                        title: name,
-                        thumbURL: nil,
-                        pageCount: cbzCount,
-                        category: nil,
-                        uploader: nil,
-                        source: sourceID.rawValue,
-                        galleryURL: item
+                        id: "\(sourceID.rawValue)_\(name)", token: name, title: name,
+                        thumbURL: nil, pageCount: cbzCount, category: nil, uploader: nil,
+                        source: sourceID.rawValue, galleryURL: item
                     )
-                    found.append(gallery)
+                    found.append((gallery, modDate))
                 }
             }
         }
 
+        // 按修改時間排序（最新在前）
         galleries = found
+            .sorted { $0.1 > $1.1 }
+            .map { $0.0 }
+        currentPage = 1
+    }
+}
+
+// MARK: - LibraryPaginationView
+
+private struct LibraryPaginationView: View {
+    @Binding var current: Int
+    let total: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button { current = max(1, current - 1) } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.plain)
+            .disabled(current <= 1)
+
+            // 頁碼 (最多顯示 5 個)
+            ForEach(visiblePages, id: \.self) { page in
+                if page == -1 {
+                    Text("…").foregroundColor(.secondary).font(.system(size: 12))
+                } else {
+                    Button("\(page)") { current = page }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: current == page ? .bold : .regular))
+                        .foregroundColor(current == page ? .accentColor : .primary)
+                        .frame(minWidth: 24)
+                        .padding(.vertical, 2)
+                        .background(current == page ? Color.accentColor.opacity(0.12) : .clear)
+                        .cornerRadius(4)
+                }
+            }
+
+            Button { current = min(total, current + 1) } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.plain)
+            .disabled(current >= total)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var visiblePages: [Int] {
+        guard total > 1 else { return [1] }
+        var pages = Set<Int>()
+        pages.formUnion([1, total])
+        for p in max(1, current - 1)...min(total, current + 1) { pages.insert(p) }
+        let sorted = pages.sorted()
+        var result: [Int] = []
+        var prev = 0
+        for p in sorted {
+            if p - prev > 1 { result.append(-1) }   // 省略號
+            result.append(p)
+            prev = p
+        }
+        return result
     }
 }
 
@@ -139,8 +299,10 @@ struct LibraryView: View {
 private struct LocalGalleryCard: View {
     let gallery: Gallery
     let onTap: () -> Void
+    let onDelete: () -> Void
 
     @State private var thumb: NSImage?
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         Button(action: onTap) {
@@ -189,6 +351,19 @@ private struct LocalGalleryCard: View {
         }
         .buttonStyle(.plain)
         .task { await loadThumb() }
+        .contextMenu {
+            Button(role: .destructive) {
+                showDeleteConfirm = true
+            } label: {
+                Label("刪除", systemImage: "trash")
+            }
+        }
+        .confirmationDialog("確定刪除「\(gallery.title)」？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("刪除", role: .destructive) { onDelete() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("此操作將刪除磁碟上的所有檔案，無法復原。")
+        }
     }
 
     private func loadThumb() async {
@@ -232,7 +407,7 @@ private struct LocalGalleryCard: View {
         }
     }
 
-    private func firstImage(in dir: URL) -> NSImage? {
+    nonisolated private func firstImage(in dir: URL) -> NSImage? {
         let exts = Set(["jpg", "jpeg", "png", "webp"])
         guard let first = ((try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil)) ?? [])

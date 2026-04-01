@@ -28,8 +28,8 @@ final class ImageLoaderRefererTests: XCTestCase {
         let (galleries, _) = try await svc.fetchComicList(page: 1, search: "", filterSlugs: [])
         let thumbURL = try XCTUnwrap(galleries.first?.thumbURL)
 
-        let img = await ImageLoader.shared.image(for: thumbURL, referer: "https://tw.manhuagui.com")
-        XCTAssertNotNil(img, "用正確 Referer 載入漫畫櫃封面圖應成功（非 nil）")
+        let img = await ImageLoader.shared.image(for: thumbURL, sourceID: .manhuagui)
+        XCTAssertNotNil(img, "用正確 sourceID 載入漫畫櫃封面圖應成功（非 nil）")
     }
 }
 

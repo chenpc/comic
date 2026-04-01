@@ -1,12 +1,21 @@
 import Foundation
 import os.log
 
+
 @MainActor
-final class EightcomicService {
+final class EightcomicService: ComicService {
     static let shared = EightcomicService()
 
     private let log = Logger(subsystem: "com.chenpc.comic", category: "EightcomicService")
     private let base = "https://www.8comic.com"
+
+    let referer = "https://www.8comic.com/"
+    nonisolated let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest  = 30
+        config.timeoutIntervalForResource = 120
+        return URLSession(configuration: config)
+    }()
 
     // MARK: - Image Extraction JS
 
@@ -78,9 +87,9 @@ final class EightcomicService {
             }
         }
 
-        // 格式二：/list/ 頁面 — <a href="/html/ID.html" ...> + <img alt="TITLE">
+        // 格式二：/list/ 頁面 — <a href="/html/ID.html" ...><img alt="TITLE">（不跨越 </a>）
         if results.isEmpty {
-            let altPattern = #"href="/html/(\d+)\.html"[^>]*>[\s\S]*?alt="([^"]+)""#
+            let altPattern = #"href="/html/(\d+)\.html"[^>]*>(?:(?!</a>)[\s\S])*?<img[^>]+alt="([^"]+)""#
             if let regex = try? NSRegularExpression(pattern: altPattern) {
                 let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
                 for match in matches {
@@ -214,7 +223,7 @@ final class EightcomicService {
             return best
         }(), !yy.isEmpty else {
             print("[8comic] FAIL step1: no encrypted var found (html len=\(html.count))")
-            throw EC8Error.parseError
+            throw ComicServiceError.parseError
         }
         print("[8comic] step1 ok: encryptedData len=\(yy.count)")
 
@@ -222,7 +231,7 @@ final class EightcomicService {
         guard let tiStr = regexCapture(#"var ti=(\d+)"#, in: html),
               let ti = Int(tiStr) else {
             print("[8comic] FAIL step2: var ti not found")
-            throw EC8Error.parseError
+            throw ComicServiceError.parseError
         }
         print("[8comic] step2 ok: ti=\(ti)")
 
@@ -231,7 +240,7 @@ final class EightcomicService {
                             .queryItems?.first(where: { $0.name == "ch" })?.value,
               let ch = Int(chStr) else {
             print("[8comic] FAIL step3: ch not in URL \(chapterURL)")
-            throw EC8Error.parseError
+            throw ComicServiceError.parseError
         }
         print("[8comic] step3 ok: ch=\(ch)")
 
@@ -378,30 +387,48 @@ final class EightcomicService {
 
         if urls.isEmpty {
             print("[8comic] FAIL step6: no urls generated (ch=\(ch), yy.len=\(yy.count), recordCount=\(i))")
-            throw EC8Error.parseError
+            throw ComicServiceError.parseError
         }
         return urls
     }
 
-    // MARK: - Private
+    // MARK: - Gallery Detail
 
-    private func fetchHTML(url: URL) async throws -> String {
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 30
-        req.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-            forHTTPHeaderField: "User-Agent")
-        req.setValue("https://www.8comic.com/", forHTTPHeaderField: "Referer")
-        let (data, _) = try await URLSession.shared.data(for: req)
-        guard let html = String(data: data, encoding: .utf8) ??
-                         String(data: data, encoding: .isoLatin1) else {
-            throw EC8Error.parseError
+    func fetchGalleryDetail(galleryURL: URL) async -> GalleryDetail? {
+        guard let html = try? await fetchHTML(url: galleryURL) else { return nil }
+        return parseGalleryDetail(from: html)
+    }
+
+    func parseGalleryDetail(from html: String) -> GalleryDetail? {
+        // <span class="mr-1 item-info-author mb-1">作者: NAME</span>
+        // 或 <meta name="author" content="NAME" />
+        var author: String? = nil
+        if let m = html.range(of: #"item-info-author[^>]*>作者:\s*([^<]+)<"#,
+                              options: .regularExpression) {
+            let raw = String(html[m])
+            if let inner = raw.range(of: #"作者:\s*([^<]+)"#, options: .regularExpression) {
+                author = String(raw[inner])
+                    .replacingOccurrences(of: #"作者:\s*"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .htmlDecoded()
+            }
         }
-        return html
+        if author == nil || author!.isEmpty {
+            if let m = html.range(of: #"<meta name="author" content="([^"]+)""#,
+                                  options: .regularExpression) {
+                let raw = String(html[m])
+                if let c = raw.range(of: #"content="([^"]+)""#, options: .regularExpression) {
+                    author = String(raw[c])
+                        .replacingOccurrences(of: #"content="|""#, with: "", options: .regularExpression)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .htmlDecoded()
+                }
+            }
+        }
+        guard let a = author, !a.isEmpty else { return nil }
+        return GalleryDetail(author: a, description: nil)
     }
 
-    enum EC8Error: LocalizedError {
-        case parseError
-        var errorDescription: String? { "8comic 解析失敗" }
-    }
+    // 向後相容 typealias
+    typealias EC8Error = ComicServiceError
 }

@@ -56,6 +56,31 @@ final class ManhuaguiURLTests: XCTestCase {
         XCTAssertTrue(url.absoluteString.contains("/s/"))
         XCTAssertTrue(url.absoluteString.contains("manhuagui"))
     }
+
+    func test_buildURL_sortOnly_page1() {
+        let url = ManhuaguiURLBuilder.build(page: 1, search: "", slugs: [], sort: "update")
+        XCTAssertEqual(url.absoluteString, "https://tw.manhuagui.com/list/update.html")
+    }
+
+    func test_buildURL_sortOnly_page2() {
+        let url = ManhuaguiURLBuilder.build(page: 2, search: "", slugs: [], sort: "update")
+        XCTAssertEqual(url.absoluteString, "https://tw.manhuagui.com/list/update_p2.html")
+    }
+
+    func test_buildURL_filterAndSort_page1() {
+        let url = ManhuaguiURLBuilder.build(page: 1, search: "", slugs: ["japan"], sort: "update")
+        XCTAssertEqual(url.absoluteString, "https://tw.manhuagui.com/list/japan/update.html")
+    }
+
+    func test_buildURL_filterAndSort_page2() {
+        let url = ManhuaguiURLBuilder.build(page: 2, search: "", slugs: ["japan"], sort: "update")
+        XCTAssertEqual(url.absoluteString, "https://tw.manhuagui.com/list/japan/update_p2.html")
+    }
+
+    func test_buildURL_multiFilterAndSort() {
+        let url = ManhuaguiURLBuilder.build(page: 1, search: "", slugs: ["japan", "rexue"], sort: "view")
+        XCTAssertEqual(url.absoluteString, "https://tw.manhuagui.com/list/japan/rexue/view.html")
+    }
 }
 
 // MARK: - 漫畫列表 HTML 解析測試
@@ -285,6 +310,114 @@ final class ManhuaguiExtractScriptBodiesTests: XCTestCase {
     }
 }
 
+// MARK: - parseGalleryDetail 單元測試
+
+final class ManhuaguiParseGalleryDetailTests: XCTestCase {
+
+    private let svc = ManhuaguiService()
+
+    private let sampleHTML = """
+    <ul class="detail-list cf">
+      <li>
+        <span><strong>漫畫作者：</strong><a href="/author/4644/" title="Ken+">Ken+</a></span>
+      </li>
+    </ul>
+    <div id="intro-cut"> 正當被誤安排到女子宿舍的アスカ進退兩難的時候，一個&ldquo;善良&rdquo;的魔法使出現在他的面前。 </div>
+    """
+
+    func test_parseGalleryDetail_author() {
+        let detail = svc.parseGalleryDetail(from: sampleHTML)
+        XCTAssertEqual(detail?.author, "Ken+")
+    }
+
+    func test_parseGalleryDetail_description() {
+        let detail = svc.parseGalleryDetail(from: sampleHTML)
+        XCTAssertNotNil(detail?.description)
+        XCTAssertTrue(detail?.description?.contains("アスカ") == true)
+    }
+
+    func test_parseGalleryDetail_description_htmlDecoded() {
+        let detail = svc.parseGalleryDetail(from: sampleHTML)
+        // &ldquo; 應解碼為 "
+        XCTAssertTrue(detail?.description?.contains("\u{201C}") == true,
+                      "HTML entity 應被解碼，實際: \(detail?.description ?? "")")
+    }
+
+    func test_parseGalleryDetail_noAuthor_returnsDescriptionOnly() {
+        let html = #"<div id="intro-cut"> 簡介文字 </div>"#
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertNil(detail?.author)
+        XCTAssertEqual(detail?.description, "簡介文字")
+    }
+
+    func test_parseGalleryDetail_noMatch_returnsNil() {
+        let detail = svc.parseGalleryDetail(from: "<html><body></body></html>")
+        XCTAssertNil(detail)
+    }
+
+    func test_parseGalleryDetail_realNetwork() async throws {
+        let url = URL(string: "https://tw.manhuagui.com/comic/232/")!
+        let detail = try await svc.fetchGalleryDetail(comicURL: url)
+        XCTAssertNotNil(detail, "應能取得漫畫詳細資料")
+        XCTAssertNotNil(detail?.author, "海賊王應有作者，實際: \(String(describing: detail?.author))")
+        print("author=\(detail?.author ?? "nil")")
+        print("desc=\(detail?.description?.prefix(80) ?? "nil")")
+    }
+}
+
+// MARK: - parseChapterImages 單元測試
+
+final class ManhuaguiParseChapterImagesTests: XCTestCase {
+
+    private let svc = ManhuaguiService()
+
+    // 最簡單的 packer：function 直接回傳 p（不做任何替換），觸發 eval 攔截
+    private func makeHTML(packedContent: String) -> String {
+        """
+        <html>
+        <script>var x = 1;</script>
+        <script>eval(function(p,a,c,k,e,d){return p}('\(packedContent)',0,0,''.split('|'),0,{}))</script>
+        </html>
+        """
+    }
+
+    private let validSMH = #"SMH.imgData({"bid":232,"cid":1001,"bname":"海賊王","cname":"第1話","files":["001.jpg","002.jpg"],"path":"/comic/232/1001/","server":"//i.hamreus.com","sl":{"e":1700000000,"m":"abc123def456"}});"#
+
+    func test_parseChapterImages_returnsURLs() throws {
+        let html = makeHTML(packedContent: validSMH)
+        let urls = try svc.parseChapterImages(from: html)
+        XCTAssertEqual(urls.count, 2)
+    }
+
+    func test_parseChapterImages_firstURLCorrect() throws {
+        let html = makeHTML(packedContent: validSMH)
+        let urls = try svc.parseChapterImages(from: html)
+        XCTAssertEqual(urls.first?.absoluteString,
+                       "https://i.hamreus.com/comic/232/1001/001.jpg?e=1700000000&m=abc123def456")
+    }
+
+    func test_parseChapterImages_noPacker_throws() {
+        let html = "<html><script>var x = 1;</script></html>"
+        XCTAssertThrowsError(try svc.parseChapterImages(from: html))
+    }
+
+    func test_parseChapterImages_packerWithEmptyFiles_returnsEmpty() throws {
+        let smh = #"SMH.imgData({"bid":1,"cid":2,"files":[],"path":"/p/","server":"//s"});"#
+        let html = makeHTML(packedContent: smh)
+        let urls = try svc.parseChapterImages(from: html)
+        XCTAssertTrue(urls.isEmpty, "files 為空時應回傳空陣列")
+    }
+
+    func test_parseChapterImages_withoutSL_noQueryString() throws {
+        let smh = #"SMH.imgData({"bid":1,"cid":2,"files":["a.jpg"],"path":"/p/","server":"//s.example.com"});"#
+        let html = makeHTML(packedContent: smh)
+        let urls = try svc.parseChapterImages(from: html)
+        XCTAssertFalse(urls.first?.absoluteString.contains("?") ?? false,
+                       "無 sl 時 URL 不應含查詢字串")
+        XCTAssertEqual(urls.first?.absoluteString, "https://s.example.com/p/a.jpg")
+    }
+}
+
 // MARK: - 整合測試（需網路）：漫畫列表
 
 final class ManhuaguiIntegrationListTests: XCTestCase {
@@ -462,12 +595,15 @@ final class ChapterNavigatorTests: XCTestCase {
 
 /// 從 ManhuaguiService 提取出來供測試用的 URL 建構邏輯
 enum ManhuaguiURLBuilder {
-    static func build(page: Int, search: String, slugs: [String]) -> URL {
+    static func build(page: Int, search: String, slugs: [String], sort: String = "") -> URL {
         if !search.isEmpty {
             let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? search
-            var comps = URLComponents(string: "https://tw.manhuagui.com/s/\(encoded)/")!
-            if page > 1 { comps.queryItems = [URLQueryItem(name: "page", value: "\(page)")] }
-            return comps.url!
+            let path = page <= 1 ? "/s/\(encoded).html" : "/s/\(encoded)_p\(page).html"
+            return URL(string: "https://tw.manhuagui.com\(path)")!
+        } else if !sort.isEmpty {
+            let prefix = slugs.isEmpty ? "" : slugs.joined(separator: "/") + "/"
+            let terminal = page <= 1 ? "\(sort).html" : "\(sort)_p\(page).html"
+            return URL(string: "https://tw.manhuagui.com/list/\(prefix)\(terminal)")!
         } else if slugs.isEmpty {
             let path = page <= 1 ? "/list/view.html" : "/list/view_p\(page).html"
             return URL(string: "https://tw.manhuagui.com\(path)")!

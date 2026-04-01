@@ -109,52 +109,6 @@ struct SettingsView: View {
 
             Divider()
 
-            // 下載管理
-            VStack(alignment: .leading, spacing: 8) {
-                Label("書籤下載", systemImage: "arrow.down.circle")
-                    .font(.headline)
-
-                let downloaded = bookmarks.bookmarks.filter { downloads.isDownloaded($0) }.count
-                let total = bookmarks.bookmarks.count
-
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("已下載 \(downloaded) / \(total) 本")
-                            .font(.system(size: 13))
-                        if total > 0 {
-                            ProgressView(value: Double(downloaded), total: Double(total))
-                                .frame(width: 200)
-                        }
-                    }
-                    Spacer()
-                    Button {
-                        downloads.downloadAll(bookmarks: bookmarks.bookmarks)
-                    } label: {
-                        Label("全部下載", systemImage: "arrow.down.to.line")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(settings.libraryURL == nil || downloaded == total)
-                }
-                .padding(10)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-            }
-
-            // 下載中列表
-            let activeDownloads = bookmarks.bookmarks.filter { downloads.states[$0.id]?.isActive == true }
-            if !activeDownloads.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("下載中")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    ForEach(activeDownloads) { gallery in
-                        DownloadProgressRow(gallery: gallery)
-                    }
-                }
-            }
-
-            Divider()
-
             // 閱讀設定
             VStack(alignment: .leading, spacing: 8) {
                 Label("閱讀設定", systemImage: "book")

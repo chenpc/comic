@@ -1,5 +1,6 @@
 import SwiftUI
 
+
 @MainActor
 final class GalleryListViewModel: ObservableObject {
     @Published var galleries: [Gallery] = []
@@ -52,10 +53,11 @@ final class GalleryListViewModel: ObservableObject {
         cursors = [nil]; totalPages = 1; totalResults = 0; galleries = []
 
         let saved = restoreSavedState()
-        searchText      = saved.search
-        lastSearch      = saved.search
-        selectedFilters = saved.filters
-        lastFilters     = saved.filters
+        searchText = saved.search
+        lastSearch = saved.search
+        let filters = saved.filters.isEmpty ? source.defaultFilters : saved.filters
+        selectedFilters = filters
+        lastFilters     = filters
 
         if saved.page > 1 {
             await goToPage(saved.page)
@@ -131,8 +133,9 @@ struct GalleryListView: View {
     @StateObject private var vm = GalleryListViewModel()
     @ObservedObject private var sourceMgr = SourceManager.shared
     let onSelect: (Gallery) -> Void
-
-    private let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)]
+    /// 外部觸發搜尋（點擊作者名）；每次設定新值才觸發
+    var authorSearchTrigger: String? = nil
+    @State private var containerWidth: CGFloat = 600
 
     var body: some View {
         VStack(spacing: 0) {
@@ -184,22 +187,44 @@ struct GalleryListView: View {
                 }
                 Spacer()
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(vm.galleries) { gallery in
-                            GalleryCard(gallery: gallery)
-                                .onTapGesture { onSelect(gallery) }
-                                .contextMenu {
-                                    Button {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(gallery.galleryURL.absoluteString, forType: .string)
-                                    } label: {
-                                        Label("複製漫畫連結", systemImage: "link")
+                let colCount = max(2, Int((containerWidth - 20) / 172))
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        Color.clear.frame(height: 0).id("scrollTop")
+                        VStack(spacing: 12) {
+                            ForEach(Array(stride(from: 0, to: vm.galleries.count, by: colCount)), id: \.self) { rowStart in
+                                let rowEnd = min(rowStart + colCount, vm.galleries.count)
+                                HStack(spacing: 12) {
+                                    ForEach(vm.galleries[rowStart..<rowEnd]) { gallery in
+                                        GalleryCard(gallery: gallery)
+                                            .onTapGesture { onSelect(gallery) }
+                                            .contextMenu {
+                                                Button {
+                                                    NSPasteboard.general.clearContents()
+                                                    NSPasteboard.general.setString(gallery.galleryURL.absoluteString, forType: .string)
+                                                } label: {
+                                                    Label("複製漫畫連結", systemImage: "link")
+                                                }
+                                            }
+                                            .frame(maxWidth: .infinity)
+                                    }
+                                    if rowEnd - rowStart < colCount {
+                                        ForEach(0..<(colCount - (rowEnd - rowStart)), id: \.self) { _ in
+                                            Color.clear.frame(maxWidth: .infinity)
+                                        }
                                     }
                                 }
+                            }
                         }
+                        .padding(10)
                     }
-                    .padding(10)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(key: WidthPreferenceKey.self, value: geo.size.width)
+                    })
+                    .onPreferenceChange(WidthPreferenceKey.self) { containerWidth = $0 }
+                    .onChange(of: vm.currentPage) {
+                        proxy.scrollTo("scrollTop", anchor: .top)
+                    }
                 }
 
                 Divider()
@@ -212,6 +237,11 @@ struct GalleryListView: View {
         .task { await vm.switchToSource(sourceMgr.activeSource) }
         .onChange(of: sourceMgr.activeSourceID) {
             Task { await vm.switchToSource(sourceMgr.activeSource) }
+        }
+        .onChange(of: authorSearchTrigger) { _, newVal in
+            guard let name = newVal, !name.isEmpty else { return }
+            vm.searchText = name
+            Task { await vm.search() }
         }
     }
 }
@@ -331,15 +361,13 @@ struct FilterBarView: View {
     let onApply: () -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(groups) { group in
-                    filterMenu(group)
-                }
+        FlowLayout(spacing: 6) {
+            ForEach(groups) { group in
+                filterMenu(group)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
     }
 
     @ViewBuilder
@@ -365,17 +393,16 @@ struct FilterBarView: View {
             HStack(spacing: 3) {
                 Text(group.label + ": " + currentLabel)
                     .font(.system(size: 11, weight: isActive ? .semibold : .regular))
-                    .foregroundColor(isActive ? .white : .secondary)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9))
-                    .foregroundColor(isActive ? .white : .secondary)
             }
+            .foregroundColor(isActive ? Color.accentColor : .primary)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(isActive ? Color.accentColor : Color(NSColor.controlBackgroundColor))
+            .background(isActive ? Color.accentColor.opacity(0.12) : Color(NSColor.controlBackgroundColor))
             .cornerRadius(12)
             .overlay(RoundedRectangle(cornerRadius: 12)
-                .stroke(Color(NSColor.separatorColor), lineWidth: isActive ? 0 : 0.5))
+                .stroke(isActive ? Color.accentColor.opacity(0.5) : Color(NSColor.separatorColor), lineWidth: 0.5))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -388,28 +415,32 @@ struct GalleryCard: View {
     let gallery: Gallery
     @State private var thumb: NSImage?
     @ObservedObject private var bookmarks = BookmarkStore.shared
+    @ObservedObject private var downloads = DownloadManager.shared
+
+    private var dlState: DownloadManager.DownloadState {
+        downloads.state(for: gallery)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 縮圖
-            ZStack(alignment: .topTrailing) {
-                ZStack {
-                    Color(NSColor.controlBackgroundColor)
-                    if let img = thumb {
-                        Image(nsImage: img)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: 220)
-                    } else {
-                        Image(systemName: "photo")
-                            .font(.largeTitle)
-                            .foregroundColor(.secondary)
-                    }
+            ZStack {
+                Color(NSColor.controlBackgroundColor)
+                if let img = thumb {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: 220)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
                 }
-                .frame(maxWidth: .infinity, maxHeight: 220)
-                .clipped()
-
-                // 書籤按鈕
+            }
+            .frame(maxWidth: .infinity, maxHeight: 220)
+            .clipped()
+            // 右上角：書籤按鈕
+            .overlay(alignment: .topTrailing) {
                 Button {
                     bookmarks.toggle(gallery)
                 } label: {
@@ -423,14 +454,19 @@ struct GalleryCard: View {
                 .buttonStyle(.plain)
                 .padding(6)
             }
+            // 右下角：下載按鈕
+            .overlay(alignment: .bottomTrailing) {
+                downloadControl
+                    .padding(6)
+            }
             .cornerRadius(6, corners: [.topLeft, .topRight])
 
-            // 標題與資訊
-            VStack(alignment: .leading, spacing: 4) {
+            // 標題（獨佔全寬，避免 wrap）
+            VStack(alignment: .leading, spacing: 3) {
                 Text(gallery.title)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .truncationMode(.tail)
                 if let pages = gallery.pageCount {
                     Text("\(pages) 頁")
                         .font(.system(size: 10))
@@ -442,12 +478,74 @@ struct GalleryCard: View {
         .background(Color(NSColor.windowBackgroundColor))
         .cornerRadius(8)
         .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 2)
-        .task {
+        .task(id: gallery.thumbURL) {
+            thumb = nil
             if let url = gallery.thumbURL {
-                thumb = await ImageLoader.shared.image(for: url)
+                let image = await ImageLoader.shared.image(for: url, sourceID: gallery.sourceID)
+                guard !Task.isCancelled else { return }
+                thumb = image
             }
         }
     }
+
+    @ViewBuilder
+    private var downloadControl: some View {
+        Group {
+            switch dlState {
+            case .notDownloaded:
+                Button {
+                    downloads.download(gallery: gallery)
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 15))
+                        .foregroundColor(.white)
+                }
+                .buttonStyle(.plain)
+            case .queued:
+                Image(systemName: "clock")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white)
+            case .downloading(let p, let t):
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.4), lineWidth: 2)
+                        .frame(width: 22, height: 22)
+                    Circle()
+                        .trim(from: 0, to: t > 0 ? Double(p) / Double(t) : 0)
+                        .stroke(Color.white, lineWidth: 2)
+                        .frame(width: 22, height: 22)
+                        .rotationEffect(.degrees(-90))
+                }
+            case .packaging:
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 22, height: 22)
+            case .completed:
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundColor(.green)
+            case .failed:
+                Button {
+                    downloads.download(gallery: gallery)
+                } label: {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(5)
+        .background(.ultraThinMaterial)
+        .clipShape(Circle())
+    }
+}
+
+// MARK: - Width Preference Key
+
+private struct WidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 // MARK: - 圓角 Helper

@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 actor ImageLoader {
@@ -26,8 +27,8 @@ actor ImageLoader {
     // MARK: - Public
 
     /// 取得圖片（優先記憶體 → 磁碟 → 網路）
-    /// - Parameter referer: 下載時使用的 Referer header（nil = 自動根據 host 選擇）
-    func image(for url: URL, referer: String? = nil) async -> NSImage? {
+    /// - Parameter sourceID: 來源 ID，決定 throttle / referer 策略
+    func image(for url: URL, sourceID: SourceID = .ehentai) async -> NSImage? {
         let key = cacheKey(for: url)
 
         if let img = memoryCache.object(forKey: key as NSString) {
@@ -45,7 +46,7 @@ actor ImageLoader {
         }
 
         let task = Task<NSImage?, Never> {
-            await self.download(url: url, key: key, referer: referer)
+            await self.download(url: url, key: key, sourceID: sourceID)
         }
         inFlight[key] = task
         let result = await task.value
@@ -54,7 +55,7 @@ actor ImageLoader {
     }
 
     /// 預先下載（不阻塞）
-    func prefetch(url: URL, referer: String? = nil) {
+    func prefetch(url: URL, sourceID: SourceID = .ehentai) {
         let key = cacheKey(for: url)
 
         if memoryCache.object(forKey: key as NSString) != nil { return }
@@ -62,7 +63,7 @@ actor ImageLoader {
         if inFlight[key] != nil { return }
 
         let task = Task<NSImage?, Never> {
-            await self.download(url: url, key: key, referer: referer)
+            await self.download(url: url, key: key, sourceID: sourceID)
         }
         inFlight[key] = task
 
@@ -106,9 +107,9 @@ actor ImageLoader {
 
     // MARK: - Private
 
-    private func download(url: URL, key: String, referer: String? = nil) async -> NSImage? {
+    private func download(url: URL, key: String, sourceID: SourceID = .ehentai) async -> NSImage? {
         do {
-            let data = try await fetchData(url: url, referer: referer)
+            let data = try await fetchData(url: url, sourceID: sourceID)
             let img: NSImage?
             if let i = NSImage(data: data) {
                 img = i
@@ -127,25 +128,29 @@ actor ImageLoader {
         }
     }
 
-    /// 根據 URL host 選擇適當的 Referer 下載圖片
-    private func fetchData(url: URL, referer: String?) async throws -> Data {
-        let effectiveReferer: String
-        if let referer {
-            effectiveReferer = referer
-        } else if let host = url.host, host.contains("hentai") || host.contains("ehgt") {
-            effectiveReferer = "https://e-hentai.org"
-        } else {
-            effectiveReferer = "https://e-hentai.org"  // default
+    /// 各 source 的圖片下載實作（由 source 註冊，各自處理 throttle / retry / referer）
+    static var fetchers: [SourceID: (URL) async throws -> Data] = [:]
+
+    /// 註冊 source 的圖片下載方法（App 啟動時由各 source 呼叫）
+    static func registerFetcher(for sourceID: SourceID, _ fetcher: @escaping (URL) async throws -> Data) {
+        fetchers[sourceID] = fetcher
+    }
+
+    private func fetchData(url: URL, sourceID: SourceID) async throws -> Data {
+        guard let fetcher = Self.fetchers[sourceID] else {
+            // fallback
+            return try await EHentaiService.shared.fetchImageData(url: url, referer: "https://e-hentai.org")
         }
-        // 直接用 EHentaiService 的 session 發送（已有 UA 等 header）
-        return try await EHentaiService.shared.fetchImageData(url: url, referer: effectiveReferer)
+        return try await fetcher(url)
     }
 
     func cacheKey(for url: URL) -> String {
-        // 使用 URL hash 避免檔名衝突
-        let hash = abs(url.absoluteString.hashValue)
+        // 使用 SHA256 確保跨次執行的穩定鍵值，避免 hashValue 每次不同造成快取錯位
+        let data = Data(url.absoluteString.utf8)
+        let digest = SHA256.hash(data: data)
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
-        return "\(hash).\(ext)"
+        return "\(hex).\(ext)"
     }
 
     private func diskPath(key: String) -> URL {

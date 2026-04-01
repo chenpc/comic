@@ -6,43 +6,54 @@ struct ReaderView: View {
     var isFullscreen: Bool = false
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        VStack(spacing: 0) {
+            ZStack {
+                Color.black.ignoresSafeArea()
 
-            // 圖片顯示（自動 fit 螢幕，支援 animated WebP / GIF）
-            if let image = vm.currentImage {
-                AnimatingImageView(image: image)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.15), value: vm.currentIndex)
-            }
-
-            // 讀取中指示器
-            if vm.isLoading {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .scaleEffect(1.5)
-                    .tint(.white)
-            }
-
-            // 錯誤訊息
-            if let error = vm.error {
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 40))
-                        .foregroundColor(.yellow)
-                    Text(error)
-                        .foregroundColor(.white)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+                // 圖片顯示（自動 fit 螢幕，支援 animated WebP / GIF）
+                if let image = vm.currentImage {
+                    AnimatingImageView(image: image)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.15), value: vm.currentIndex)
                 }
+
+                // 讀取中指示器
+                if vm.isLoading {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(1.5)
+                        .tint(.white)
+                }
+
+                // 錯誤訊息
+                if let error = vm.error {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 40))
+                            .foregroundColor(.yellow)
+                        Text(error)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                }
+
+                // 鍵盤事件處理（隱形覆蓋層）
+                KeyboardHandler(
+                    onLeft: { vm.prevPage() },
+                    onRight: { vm.nextPage() },
+                    onToggleFullscreen: {
+                        NSApp.keyWindow?.toggleFullScreen(nil)
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
             }
 
             // 頁碼顯示（全螢幕時隱藏）
             if vm.totalPages > 0 && !isFullscreen {
-                VStack {
-                    Spacer()
-                    HStack {
+                HStack {
                         // 上一集按鈕
                         if vm.hasPrevChapter {
                             Button {
@@ -123,22 +134,11 @@ struct ReaderView: View {
                             }
                             .buttonStyle(.plain)
                         }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 16)
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(Color.black)
             }
-
-            // 鍵盤事件處理（隱形覆蓋層）
-            KeyboardHandler(
-                onLeft: { vm.prevPage() },
-                onRight: { vm.nextPage() },
-                onToggleFullscreen: {
-                    NSApp.keyWindow?.toggleFullScreen(nil)
-                }
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .allowsHitTesting(false)
         }
     }
 }
@@ -153,6 +153,9 @@ struct AnimatingImageView: NSViewRepresentable {
         view.imageScaling = .scaleProportionallyUpOrDown
         view.animates = true
         view.image = image
+        // 確保 NSImageView 不會超出容器
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         return view
     }
 

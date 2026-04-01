@@ -2,66 +2,88 @@ import Foundation
 import JavaScriptCore
 import os.log
 
-final class ManhuarenService {
+private let mhrLogURL = URL(fileURLWithPath: "/tmp/comic_mhr.log")
+private func mhrlog(_ msg: String) {
+    let line = "[\(Date())] \(msg)\n"
+    if let data = line.data(using: .utf8) {
+        if FileManager.default.fileExists(atPath: mhrLogURL.path),
+           let fh = try? FileHandle(forWritingTo: mhrLogURL) {
+            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+        } else {
+            try? data.write(to: mhrLogURL)
+        }
+    }
+}
+
+final class ManhuarenService: ComicService {
     static let shared = ManhuarenService()
 
     private let log = Logger(subsystem: "com.chenpc.comic", category: "ManhuarenService")
     private let base = "https://www.manhuaren.com"
 
-    private let session: URLSession
+    let session: URLSession
+    let referer = "https://www.manhuaren.com/"
 
     init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest  = 30
         config.timeoutIntervalForResource = 120
-        config.httpAdditionalHeaders = [
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-            "Referer":    "https://www.manhuaren.com/",
-        ]
         session = URLSession(configuration: config)
     }
 
     // MARK: - 列表 / 搜尋
 
-    func fetchComicList(page: Int, search: String, slug: String) async throws -> (galleries: [Gallery], totalPages: Int) {
+    func fetchComicList(page: Int, search: String, slug: String, paramOverrides: [String: String] = [:]) async throws -> (galleries: [Gallery], totalPages: Int) {
         if !search.isEmpty {
             return try await fetchSearch(page: page, search: search)
         }
+        if !paramOverrides.isEmpty {
+            // 有篩選條件：全部走 AJAX（含第 1 頁），確保所有 params 都生效
+            // 以預設值為基礎，疊加 paramOverrides，不污染 ajaxParams 共享狀態
+            mhrlog("fetchComicList AJAX page=\(page) overrides=\(paramOverrides)")
+            return try await fetchAJAXPage(page: page, overrides: paramOverrides)
+        }
+        // 無篩選：第 1 頁用 HTML 解析，第 2 頁以後走 AJAX
         if page == 1 {
-            // 第一頁：直接 GET 分類/列表頁（HTML 已含 21 筆）
-            let pageURL = slug.isEmpty
-                ? URL(string: "\(base)/manhua-list/")!
-                : URL(string: "\(base)/\(slug)/")!
-            log.info("fetchComicList page=1 url=\(pageURL)")
+            let pageURL = URL(string: "\(base)/manhua-list/")!
+            mhrlog("fetchComicList HTML page=1 url=\(pageURL)")
             let html = try await fetchHTML(url: pageURL)
-            // 從 HTML 取 JS 變數作為 AJAX 參數
-            ajaxParams = parseAJAXParams(from: html, slug: slug)
+            ajaxParams = parseAJAXParams(from: html, slug: "")
+            mhrlog("  ajaxParams sort=\(ajaxParams["sort"] ?? "?")")
             let galleries = parseGalleryList(from: html)
+            mhrlog("  parsed \(galleries.count) galleries, first=\(galleries.first?.title ?? "-")")
             return (galleries, galleries.isEmpty ? 1 : page + 1)
         } else {
-            // page > 1：用 AJAX API
             return try await fetchAJAXPage(page: page)
         }
     }
 
-    /// 儲存第一頁解析到的 AJAX 參數，供後續頁使用
+    /// 儲存無篩選時第 1 頁解析到的 AJAX 基底參數（供無篩選翻頁使用）
     private var ajaxParams: [String: String] = [:]
+
+    private static let defaultAJAXParams: [String: String] = [
+        "categoryid": "0", "tagid": "0", "status": "0",
+        "usergroup": "0", "pay": "-1", "areaid": "0",
+        "sort": "10", "iscopyright": "0",
+    ]
 
     private func fetchSearch(page: Int, search: String) async throws -> ([Gallery], Int) {
         let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? search
         let url = URL(string: "\(base)/search/?title=\(encoded)&language=1&page=\(page)")!
         log.info("fetchSearch url=\(url)")
         let html = try await fetchHTML(url: url)
-        let galleries = parseGalleryList(from: html)
+        let galleries = parseGalleryList(from: html, isSearch: true)
         return (galleries, galleries.isEmpty ? page : page + 1)
     }
 
-    private func fetchAJAXPage(page: Int) async throws -> ([Gallery], Int) {
+    private func fetchAJAXPage(page: Int, overrides: [String: String] = [:]) async throws -> ([Gallery], Int) {
         var req = URLRequest(url: URL(string: "\(base)/dm5.ashx?d=\(Date().timeIntervalSince1970)")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        var params = ajaxParams
+        // 基底：有 overrides 時用預設值，否則用 HTML 解析到的 ajaxParams
+        var params = overrides.isEmpty ? ajaxParams : Self.defaultAJAXParams
+        for (k, v) in overrides { params[k] = v }
         params["action"] = "getclasscomics"
         params["pageindex"] = "\(page)"
         params["pagesize"] = "21"
@@ -70,7 +92,7 @@ final class ManhuarenService {
         log.info("fetchAJAXPage page=\(page) params=\(params)")
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw MHRError.badResponse
+            throw ComicServiceError.badResponse
         }
         let galleries = try parseAJAXResponse(data: data)
         return (galleries, galleries.isEmpty ? page : page + 1)
@@ -94,7 +116,7 @@ final class ManhuarenService {
     func parseAJAXResponse(data: Data) throws -> [Gallery] {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let items = json["UpdateComicItems"] as? [[String: Any]] else {
-            throw MHRError.parseError
+            throw ComicServiceError.parseError
         }
         return items.compactMap { item in
             guard let key   = item["UrlKey"]       as? String,
@@ -108,11 +130,70 @@ final class ManhuarenService {
         }
     }
 
-    // MARK: - 章節列表
+    // MARK: - 章節列表 + 詳細資料
 
     func fetchChapters(galleryURL: URL) async throws -> [Chapter] {
         let html = try await fetchHTML(url: galleryURL)
         return parseChapters(from: html)
+    }
+
+    func fetchGalleryDetail(galleryURL: URL) async -> GalleryDetail? {
+        guard let html = try? await fetchHTML(url: galleryURL) else { return nil }
+        return parseGalleryDetail(from: html)
+    }
+
+    func parseGalleryDetail(from html: String) -> GalleryDetail? {
+        // 作者解析：兩步驟策略
+        // 步驟1：找出包含「作者」的段落（允許 <> 在內）
+        // 步驟2：從段落中取最後一個 >TEXT</a> 的文字
+        var author: String?
+        let authorSectionPatterns: [(String, NSRegularExpression.Options)] = [
+            (#"作者[：:].{0,300}?</a>"#,         .dotMatchesLineSeparators),   // 作者：...<a>NAME</a>
+            (#"<em>作者</em>.{0,300}?</a>"#,     .dotMatchesLineSeparators),   // <em>作者</em>...<a>NAME</a>
+            (#"作者</[a-z]+>.{0,300}?</a>"#,     .dotMatchesLineSeparators),   // 作者</span>...<a>NAME</a>
+        ]
+        outer: for (pattern, opts) in authorSectionPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: opts),
+                  let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+                  let sectionRange = Range(m.range(at: 0), in: html) else { continue }
+            let section = String(html[sectionRange])
+            // 在段落裡找所有 >TEXT</a>，取第一個非空的
+            guard let nameRegex = try? NSRegularExpression(pattern: #">([^<>]+)</a>"#) else { continue }
+            let ns = NSRange(section.startIndex..., in: section)
+            for nm in nameRegex.matches(in: section, range: ns) {
+                guard let nr = Range(nm.range(at: 1), in: section) else { continue }
+                let name = String(section[nr]).mhrHTMLDecoded().trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty {
+                    author = name
+                    break outer
+                }
+            }
+        }
+
+        // 簡介：常見 class="detail-desc" 或在「簡介」標題後面
+        var description: String?
+        let descPatterns = [
+            #"class="detail-desc[^"]*"[^>]*>\s*([\s\S]{10,500}?)\s*(?:</p>|</div>)"#,
+            #"class="detail-introduction[^"]*"[^>]*>\s*([\s\S]{10,500}?)\s*</div>"#,
+            #"簡介[：:]\s*</[^>]+>\s*<[^>]+>\s*([\s\S]{10,500}?)\s*<"#,
+        ]
+        for pattern in descPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+               let r = Range(m.range(at: 1), in: html) {
+                let raw = String(html[r])
+                    .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                    .mhrHTMLDecoded()
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if raw.count > 5 {
+                    description = raw
+                    break
+                }
+            }
+        }
+
+        guard author != nil || description != nil else { return nil }
+        return GalleryDetail(author: author, description: description)
     }
 
     // MARK: - 章節圖片
@@ -123,41 +204,33 @@ final class ManhuarenService {
         return try extractImages(from: html)
     }
 
-    // MARK: - HTML 下載
-
-    private func fetchHTML(url: URL) async throws -> String {
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw MHRError.badResponse
-        }
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
-    }
-
     // MARK: - 解析：列表
 
-    func parseGalleryList(from html: String) -> [Gallery] {
+    func parseGalleryList(from html: String, isSearch: Bool = false) -> [Gallery] {
         var galleries: [Gallery] = []
 
-        // 搜尋頁格式：href="..." title="..."><img src="...">
-        let searchPattern = #"href="(/manhua-[^"?]+/)"[^>]*title="([^"]+)"[^>]*>\s*<img[^>]+src="(https?://[^"]+)""#
-        if let regex = try? NSRegularExpression(pattern: searchPattern) {
-            let range = NSRange(html.startIndex..., in: html)
-            for m in regex.matches(in: html, range: range) {
-                guard let r1 = Range(m.range(at: 1), in: html),
-                      let r2 = Range(m.range(at: 2), in: html),
-                      let r3 = Range(m.range(at: 3), in: html) else { continue }
-                let path  = String(html[r1])
-                let title = String(html[r2]).mhrHTMLDecoded()
-                let thumb = URL(string: String(html[r3]))
-                let slug  = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                let gURL  = URL(string: "\(base)\(path)")!
-                galleries.append(Gallery(id: slug, token: slug, title: title,
-                                         thumbURL: thumb, pageCount: nil, category: nil,
-                                         uploader: nil, source: SourceID.manhuaren.rawValue,
-                                         galleryURL: gURL))
+        // 搜尋頁格式：只在真正搜尋結果頁才用（避免分類頁的導覽連結誤匹配）
+        if isSearch {
+            let searchPattern = #"href="(/manhua-[^"?]+/)"[^>]*title="([^"]+)"[^>]*>\s*<img[^>]+src="(https?://[^"]+)""#
+            if let regex = try? NSRegularExpression(pattern: searchPattern) {
+                let range = NSRange(html.startIndex..., in: html)
+                for m in regex.matches(in: html, range: range) {
+                    guard let r1 = Range(m.range(at: 1), in: html),
+                          let r2 = Range(m.range(at: 2), in: html),
+                          let r3 = Range(m.range(at: 3), in: html) else { continue }
+                    let path  = String(html[r1])
+                    let title = String(html[r2]).mhrHTMLDecoded()
+                    let thumb = URL(string: String(html[r3]))
+                    let slug  = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    let gURL  = URL(string: "\(base)\(path)")!
+                    galleries.append(Gallery(id: slug, token: slug, title: title,
+                                             thumbURL: thumb, pageCount: nil, category: nil,
+                                             uploader: nil, source: SourceID.manhuaren.rawValue,
+                                             galleryURL: gURL))
+                }
             }
+            if !galleries.isEmpty { return galleries }
         }
-        if !galleries.isEmpty { return galleries }
 
         // 分類/列表頁格式：分兩步抓 href 與 title，按順序配對
         // step1: 從 manga-list-2-cover-img 取 href + thumb
@@ -239,7 +312,7 @@ final class ManhuarenService {
               let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let r = Range(m.range(at: 1), in: html) else {
             log.warning("extractImages: 找不到包含 newImgs 的 script")
-            throw MHRError.parseError
+            throw ComicServiceError.parseError
         }
         let packedJS = String(html[r])
 
@@ -254,7 +327,7 @@ final class ManhuarenService {
               let count = arr.objectForKeyedSubscript("length")?.toInt32(),
               count > 0 else {
             log.warning("extractImages: newImgs 不存在或為空")
-            throw MHRError.parseError
+            throw ComicServiceError.parseError
         }
         var urls: [URL] = []
         for i in 0..<Int(count) {
@@ -277,15 +350,8 @@ final class ManhuarenService {
         return String(html[r])
     }
 
-    enum MHRError: LocalizedError {
-        case badResponse, parseError
-        var errorDescription: String? {
-            switch self {
-            case .badResponse: return "伺服器回應錯誤"
-            case .parseError:  return "解析頁面失敗"
-            }
-        }
-    }
+    // 向後相容 typealias
+    typealias MHRError = ComicServiceError
 }
 
 private extension String {

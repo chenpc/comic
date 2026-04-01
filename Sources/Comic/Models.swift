@@ -126,6 +126,26 @@ struct Gallery: Identifiable, Hashable, Codable {
     var sourceID: SourceID { SourceID(rawValue: source) ?? .ehentai }
 }
 
+// MARK: - GalleryDetail（漫畫詳細資料）
+
+struct GalleryDetail {
+    let author: String?
+    let description: String?
+    // 可選欄位：各 source 視可用資料填入
+    let tags: [String]?         // 標籤列表
+    let status: String?         // 連載狀態（連載中 / 完結 / 休刊）
+    let updateDate: String?     // 最後更新日期
+
+    init(author: String? = nil, description: String? = nil,
+         tags: [String]? = nil, status: String? = nil, updateDate: String? = nil) {
+        self.author      = author
+        self.description = description
+        self.tags        = tags
+        self.status      = status
+        self.updateDate  = updateDate
+    }
+}
+
 // MARK: - Chapter（漫畫櫃章節）
 
 struct Chapter: Identifiable, Hashable {

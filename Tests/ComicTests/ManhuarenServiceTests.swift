@@ -59,34 +59,34 @@ final class ManhuarenParseListTests: XCTestCase {
     // MARK: - 搜尋頁格式
 
     func test_parseGalleryList_search_count() {
-        let galleries = svc.parseGalleryList(from: searchHTML)
+        let galleries = svc.parseGalleryList(from: searchHTML, isSearch: true)
         XCTAssertEqual(galleries.count, 2)
     }
 
     func test_parseGalleryList_search_title() {
-        let galleries = svc.parseGalleryList(from: searchHTML)
+        let galleries = svc.parseGalleryList(from: searchHTML, isSearch: true)
         XCTAssertEqual(galleries.first?.title, "海贼王")
     }
 
     func test_parseGalleryList_search_htmlEntityDecoded() {
-        let galleries = svc.parseGalleryList(from: searchHTML)
+        let galleries = svc.parseGalleryList(from: searchHTML, isSearch: true)
         XCTAssertEqual(galleries.last?.title, "火影忍者 & 特別篇")
     }
 
     func test_parseGalleryList_search_galleryURL() {
-        let galleries = svc.parseGalleryList(from: searchHTML)
+        let galleries = svc.parseGalleryList(from: searchHTML, isSearch: true)
         XCTAssertEqual(galleries.first?.galleryURL.absoluteString,
                        "https://www.manhuaren.com/manhua-haizeiwang-onepiece/")
     }
 
     func test_parseGalleryList_search_thumbURL() {
-        let galleries = svc.parseGalleryList(from: searchHTML)
+        let galleries = svc.parseGalleryList(from: searchHTML, isSearch: true)
         XCTAssertNotNil(galleries.first?.thumbURL)
         XCTAssertTrue(galleries.first?.thumbURL?.absoluteString.contains("cdndm5.com") == true)
     }
 
     func test_parseGalleryList_search_source() {
-        let galleries = svc.parseGalleryList(from: searchHTML)
+        let galleries = svc.parseGalleryList(from: searchHTML, isSearch: true)
         XCTAssertEqual(galleries.first?.source, SourceID.manhuaren.rawValue)
     }
 
@@ -301,6 +301,229 @@ final class ManhuarenExtractImagesTests: XCTestCase {
     }
 }
 
+// MARK: - parseGalleryDetail 測試
+
+final class ManhuarenParseGalleryDetailTests: XCTestCase {
+
+    private let svc = ManhuarenService()
+
+    // 結構1：作者：直接後接 <a>（URL 含多個查詢參數）
+    func test_author_inlineColon() {
+        let html = """
+        <p>作者：<a href="/search/?title=尾田荣一郎&language=1&f=2">尾田荣一郎</a></p>
+        """
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertEqual(detail?.author, "尾田荣一郎", "inline 作者：<a> 應解析正確")
+    }
+
+    // 結構2：作者：</span> 後接 <a>（span 包住 label）
+    func test_author_afterClosingSpan() {
+        let html = """
+        <p><span class="info-label">作者：</span><a href="/search/?title=鸟山明&language=1&f=2">鸟山明</a></p>
+        """
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertEqual(detail?.author, "鸟山明", "作者：</span><a> 應解析正確")
+    }
+
+    // 結構3：<em>作者</em> 後接 <a>
+    func test_author_emTag() {
+        let html = """
+        <p><em>作者</em><a href="/search/?title=岸本齐史&language=1&f=2">岸本齐史</a></p>
+        """
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertEqual(detail?.author, "岸本齐史", "<em>作者</em><a> 應解析正確")
+    }
+
+    // 結構4：有換行和空白
+    func test_author_withWhitespace() {
+        let html = """
+        <p class="detail-list-1-item">
+          作者：
+          <a href="/search/?title=作者名&language=1&f=2">作者名</a>
+        </p>
+        """
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertEqual(detail?.author, "作者名", "有換行空白時應能正確解析")
+    }
+
+    // 結構5：多個作者（取第一個）
+    func test_author_multiple_takesFirst() {
+        let html = """
+        <p>作者：<a href="/search/?title=作者A&language=1&f=2">作者A</a>
+               <a href="/search/?title=作者B&language=1&f=2">作者B</a></p>
+        """
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertEqual(detail?.author, "作者A", "多作者時應取第一個")
+    }
+
+    // 結構6：無作者
+    func test_author_notFound_returnsNil() {
+        let html = "<html><body><p>漫畫簡介</p></body></html>"
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertNil(detail?.author, "無作者時應為 nil")
+    }
+
+    // 簡介解析
+    func test_description_detailDescClass() {
+        let html = """
+        <div class="detail-desc">這是一部關於海賊的漫畫。主角是路飛。</div>
+        """
+        let detail = svc.parseGalleryDetail(from: html)
+        XCTAssertNotNil(detail?.description, "應能解析 detail-desc 簡介")
+        XCTAssertTrue(detail?.description?.contains("海賊") == true)
+    }
+}
+
+// MARK: - parseAJAXParams 測試（間接覆蓋 parseJSVar）
+
+final class ManhuarenParseAJAXParamsTests: XCTestCase {
+
+    private let svc = ManhuarenService()
+
+    // 含所有已知 JS 變數的 HTML 片段
+    private let fullHTML = """
+    <script>
+    var categoryid = '1';
+    var tagid = '2';
+    var status = '3';
+    var usergroup = '4';
+    var pay = '0';
+    var areaid = '5';
+    var sort = '20';
+    var iscopyright = 'true';
+    </script>
+    """
+
+    func test_parseAJAXParams_categoryid() {
+        let params = svc.parseAJAXParams(from: fullHTML, slug: "")
+        XCTAssertEqual(params["categoryid"], "1")
+    }
+
+    func test_parseAJAXParams_tagid() {
+        let params = svc.parseAJAXParams(from: fullHTML, slug: "")
+        XCTAssertEqual(params["tagid"], "2")
+    }
+
+    func test_parseAJAXParams_sort() {
+        let params = svc.parseAJAXParams(from: fullHTML, slug: "")
+        XCTAssertEqual(params["sort"], "20")
+    }
+
+    func test_parseAJAXParams_iscopyright_true_convertsTo1() {
+        let params = svc.parseAJAXParams(from: fullHTML, slug: "")
+        XCTAssertEqual(params["iscopyright"], "1")
+    }
+
+    func test_parseAJAXParams_iscopyright_false_convertsTo0() {
+        let html = "<script>var iscopyright = 'false';</script>"
+        let params = svc.parseAJAXParams(from: html, slug: "")
+        XCTAssertEqual(params["iscopyright"], "0")
+    }
+
+    func test_parseAJAXParams_missingVars_usesDefaults() {
+        // HTML 中沒有任何 JS 變數，應回傳預設值
+        let params = svc.parseAJAXParams(from: "<html></html>", slug: "")
+        XCTAssertEqual(params["categoryid"], "0")
+        XCTAssertEqual(params["tagid"], "0")
+        XCTAssertEqual(params["sort"], "10")
+        XCTAssertEqual(params["iscopyright"], "0")
+    }
+
+    func test_parseAJAXParams_partialVars_overridesOnly() {
+        // 只有部分變數，其他保持預設
+        let html = "<script>var categoryid = '7'; var sort = '5';</script>"
+        let params = svc.parseAJAXParams(from: html, slug: "")
+        XCTAssertEqual(params["categoryid"], "7")
+        XCTAssertEqual(params["sort"], "5")
+        XCTAssertEqual(params["tagid"], "0")  // 預設值
+    }
+}
+
+// MARK: - parseAJAXResponse 測試
+
+final class ManhuarenParseAJAXResponseTests: XCTestCase {
+
+    private let svc = ManhuarenService()
+
+    private let sampleJSON = """
+    {
+      "UpdateComicItems": [
+        {
+          "UrlKey": "manhua-haizeiwang-onepiece",
+          "Title": "海贼王",
+          "ShowPicUrlB": "https://mhfm5hk.cdndm5.com/1/432/cover.jpeg"
+        },
+        {
+          "UrlKey": "manhua-naruto",
+          "Title": "火影忍者 &amp; 特別篇",
+          "ShowPicUrlB": "https://mhfm5hk.cdndm5.com/1/100/cover.jpeg"
+        }
+      ]
+    }
+    """.data(using: .utf8)!
+
+    func test_parseAJAXResponse_count() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.count, 2)
+    }
+
+    func test_parseAJAXResponse_id() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.first?.id, "manhua-haizeiwang-onepiece")
+    }
+
+    func test_parseAJAXResponse_title() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.first?.title, "海贼王")
+    }
+
+    func test_parseAJAXResponse_htmlEntityDecoded() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.last?.title, "火影忍者 & 特別篇")
+    }
+
+    func test_parseAJAXResponse_thumbURL() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.first?.thumbURL?.absoluteString,
+                       "https://mhfm5hk.cdndm5.com/1/432/cover.jpeg")
+    }
+
+    func test_parseAJAXResponse_galleryURL() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.first?.galleryURL.absoluteString,
+                       "https://www.manhuaren.com/manhua-haizeiwang-onepiece/")
+    }
+
+    func test_parseAJAXResponse_source() throws {
+        let galleries = try svc.parseAJAXResponse(data: sampleJSON)
+        XCTAssertEqual(galleries.first?.source, SourceID.manhuaren.rawValue)
+    }
+
+    func test_parseAJAXResponse_missingURLKey_skipped() throws {
+        let json = """
+        {"UpdateComicItems": [{"Title": "無 UrlKey"}]}
+        """.data(using: .utf8)!
+        let galleries = try svc.parseAJAXResponse(data: json)
+        XCTAssertTrue(galleries.isEmpty, "缺少 UrlKey 的 item 應被略過")
+    }
+
+    func test_parseAJAXResponse_invalidJSON_throws() {
+        let badData = "not json".data(using: .utf8)!
+        XCTAssertThrowsError(try svc.parseAJAXResponse(data: badData))
+    }
+
+    func test_parseAJAXResponse_missingUpdateComicItems_throws() {
+        let json = #"{"status": "ok"}"#.data(using: .utf8)!
+        XCTAssertThrowsError(try svc.parseAJAXResponse(data: json))
+    }
+
+    func test_parseAJAXResponse_emptyItems_returnsEmpty() throws {
+        let json = #"{"UpdateComicItems": []}"#.data(using: .utf8)!
+        let galleries = try svc.parseAJAXResponse(data: json)
+        XCTAssertTrue(galleries.isEmpty)
+    }
+}
+
 // MARK: - 整合測試（需要網路）
 
 final class ManhuarenIntegrationTests: XCTestCase {
@@ -328,6 +551,40 @@ final class ManhuarenIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(chapters.count, 100, "海贼王應有 100+ 章")
         XCTAssertTrue(chapters.last?.title.contains("1177") == true || chapters.count > 900,
                       "最新章節應含 1177")
+    }
+
+    func test_fetchGalleryDetail_haizeiwang() async throws {
+        let url = URL(string: "https://www.manhuaren.com/manhua-haizeiwang-onepiece/")!
+        let detail = await svc.fetchGalleryDetail(galleryURL: url)
+        XCTAssertNotNil(detail, "應能取得漫畫詳細資料")
+        XCTAssertNotNil(detail?.author, "海賊王應有作者資料，實際: \(String(describing: detail?.author))")
+        print("✅ author=\(detail?.author ?? "nil")")
+        print("✅ description=\(detail?.description?.prefix(80) ?? "nil")")
+    }
+
+    // 抓原始 HTML 供 debug 用
+    func test_fetchGalleryDetail_printRawHTML() async throws {
+        let url = URL(string: "https://www.manhuaren.com/manhua-haizeiwang-onepiece/")!
+        let config = URLSessionConfiguration.default
+        config.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+            "Referer": "https://www.manhuaren.com/",
+        ]
+        let session = URLSession(configuration: config)
+        let (data, _) = try await session.data(from: url)
+        let html = String(data: data, encoding: .utf8) ?? ""
+        print("📄 HTML length=\(html.count)")
+        // 找所有「作者」出現位置並印出上下文
+        var searchRange = html.startIndex..<html.endIndex
+        var found = false
+        while let range = html.range(of: "作者", range: searchRange) {
+            found = true
+            let ctxStart = max(html.startIndex, html.index(range.lowerBound, offsetBy: -30, limitedBy: html.startIndex) ?? html.startIndex)
+            let ctxEnd   = min(html.endIndex,   html.index(range.upperBound, offsetBy: 150, limitedBy: html.endIndex)   ?? html.endIndex)
+            print("--- 作者 context ---\n\(html[ctxStart..<ctxEnd])\n")
+            searchRange = range.upperBound..<html.endIndex
+        }
+        if !found { print("⚠️ HTML 中找不到「作者」字串") }
     }
 
     func test_fetchChapterImages_returnsURLs() async throws {

@@ -37,4 +37,8 @@ final class EHentaiSource: ComicSource {
     func fetchChapters(gallery: Gallery) async throws -> [Chapter] { [] }
 
     func fetchImageURLs(url: URL) async throws -> [URL] { [] }
+
+    func fetchImageData(url: URL) async throws -> Data {
+        try await EHentaiService.shared.fetchImageData(url: url, referer: "https://e-hentai.org")
+    }
 }

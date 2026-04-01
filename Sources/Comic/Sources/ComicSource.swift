@@ -33,10 +33,21 @@ protocol ComicSource: AnyObject {
     var hasChapters: Bool { get }
     /// 各來源自定義的篩選群組（空陣列代表不支援篩選）
     var filterGroups: [FilterGroup] { get }
+    /// 新開來源時套用的預設篩選值（未設定的 key 視為「全部」）
+    var defaultFilters: [String: String] { get }
 
     func fetchList(page: Int, search: String, filters: [String: String], extra: [String: Any]) async throws -> ListPage
     func fetchChapters(gallery: Gallery) async throws -> [Chapter]
     func fetchImageURLs(url: URL) async throws -> [URL]
+    /// 下載圖片 data（各 source 自行處理 throttle / retry / referer）
+    func fetchImageData(url: URL) async throws -> Data
+    /// 漫畫詳細資料（作者、簡介）；不支援的 source 回傳 nil
+    func fetchGalleryDetail(gallery: Gallery) async -> GalleryDetail?
+}
+
+extension ComicSource {
+    var defaultFilters: [String: String] { [:] }
+    func fetchGalleryDetail(gallery: Gallery) async -> GalleryDetail? { return nil }
 }
 
 // MARK: - SourceManager

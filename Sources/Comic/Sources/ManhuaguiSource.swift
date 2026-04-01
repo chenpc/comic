@@ -6,6 +6,7 @@ final class ManhuaguiSource: ComicSource {
     let sourceID: SourceID = .manhuagui
     let supportsSearch     = true
     let hasChapters        = true
+    let defaultFilters: [String: String] = ["sort": "update"]
 
     // MARK: - 篩選群組定義（順序決定 URL 路徑順序）
 
@@ -86,6 +87,12 @@ final class ManhuaguiSource: ComicSource {
                 FilterOption(id: "lianzai", label: "連載"),
                 FilterOption(id: "wanjie",  label: "完結"),
             ]),
+            FilterGroup(id: "sort", label: "排序", options: [
+                FilterOption(id: "",       label: "預設"),
+                FilterOption(id: "update", label: "更新"),
+                FilterOption(id: "view",   label: "人氣"),
+                FilterOption(id: "score",  label: "評分"),
+            ]),
         ]
     }
 
@@ -102,19 +109,24 @@ final class ManhuaguiSource: ComicSource {
     // MARK: - fetchList
 
     func fetchList(page: Int, search: String, filters: [String: String], extra: [String: Any]) async throws -> ListPage {
-        // 按定義順序組合非空的 filter slug
-        let groupOrder = ["area", "genre", "audience", "year", "letter", "status"]
-        let slugs = groupOrder.compactMap { gid -> String? in
+        // 篩選 slug（排序除外）
+        let filterOrder = ["area", "genre", "audience", "year", "letter", "status"]
+        let filterSlugs = filterOrder.compactMap { gid -> String? in
             guard let v = filters[gid], !v.isEmpty else { return nil }
             return v
         }
+        let sort = filters["sort"] ?? ""
         let (galleries, totalPages) = try await ManhuaguiService.shared.fetchComicList(
-            page: page, search: search, filterSlugs: slugs)
+            page: page, search: search, filterSlugs: filterSlugs, sort: sort)
         return ListPage(galleries: galleries,
                         currentPage: page,
                         totalPages: totalPages,
                         totalResults: totalPages * 20,
                         nextCursor: nil)
+    }
+
+    func fetchGalleryDetail(gallery: Gallery) async -> GalleryDetail? {
+        try? await ManhuaguiService.shared.fetchGalleryDetail(comicURL: gallery.galleryURL)
     }
 
     func fetchChapters(gallery: Gallery) async throws -> [Chapter] {
@@ -123,5 +135,11 @@ final class ManhuaguiSource: ComicSource {
 
     func fetchImageURLs(url: URL) async throws -> [URL] {
         try await ManhuaguiService.shared.fetchChapterImages(chapterURL: url)
+    }
+
+    func fetchImageData(url: URL) async throws -> Data {
+        try await ManhuaguiThrottle.shared.fetchWithRetry {
+            try await EHentaiService.shared.fetchImageData(url: url, referer: "https://tw.manhuagui.com")
+        }
     }
 }

@@ -6,6 +6,7 @@ final class EightcomicSource: ComicSource {
     let sourceID: SourceID = .eightcomic
     let supportsSearch     = true
     let hasChapters        = true
+    let defaultFilters: [String: String] = ["sort": "new"]
 
     var filterGroups: [FilterGroup] {
         [
@@ -50,7 +51,15 @@ final class EightcomicSource: ComicSource {
         try await EightcomicService.shared.fetchChapters(mangaURL: gallery.galleryURL)
     }
 
+    func fetchImageData(url: URL) async throws -> Data {
+        try await EHentaiService.shared.fetchImageData(url: url, referer: "https://www.8comic.com/")
+    }
+
     func fetchImageURLs(url: URL) async throws -> [URL] {
         try await EightcomicService.shared.fetchChapterImages(chapterURL: url)
+    }
+
+    func fetchGalleryDetail(gallery: Gallery) async -> GalleryDetail? {
+        await EightcomicService.shared.fetchGalleryDetail(galleryURL: gallery.galleryURL)
     }
 }

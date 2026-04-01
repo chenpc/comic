@@ -170,3 +170,116 @@ final class EHentaiServiceParsingTests: XCTestCase {
         XCTAssertEqual(svc.parseGalleryList(from: "<html></html>").count, 0)
     }
 }
+
+// MARK: - 整合測試（需要網路）
+
+final class EHentaiIntegrationTests: XCTestCase {
+
+    private let svc = EHentaiService()
+
+    /// 從列表取第一個圖庫 URL
+    private func firstGalleryURL() async throws -> URL {
+        let result = try await svc.fetchGalleryList()
+        let g = try XCTUnwrap(result.galleries.first, "列表不應為空")
+        return g.galleryURL
+    }
+
+    // MARK: - fetchGalleryList
+
+    func test_fetchGalleryList_returnsGalleries() async throws {
+        let result = try await svc.fetchGalleryList()
+        XCTAssertGreaterThan(result.galleries.count, 0, "首頁應有至少 1 筆圖庫")
+    }
+
+    func test_fetchGalleryList_galleriesHaveID() async throws {
+        let result = try await svc.fetchGalleryList()
+        for g in result.galleries {
+            XCTAssertFalse(g.id.isEmpty, "gallery id 不應為空")
+            XCTAssertFalse(g.token.isEmpty, "gallery token 不應為空")
+        }
+    }
+
+    func test_fetchGalleryList_galleriesHaveTitle() async throws {
+        let result = try await svc.fetchGalleryList()
+        for g in result.galleries {
+            XCTAssertFalse(g.title.isEmpty, "gallery title 不應為空：id=\(g.id)")
+        }
+    }
+
+    func test_fetchGalleryList_nextCursorExists() async throws {
+        let result = try await svc.fetchGalleryList()
+        XCTAssertNotNil(result.nextCursor, "首頁應有 nextCursor")
+    }
+
+    func test_fetchGalleryList_totalResultsPositive() async throws {
+        let result = try await svc.fetchGalleryList()
+        XCTAssertGreaterThan(result.totalResults, 0, "totalResults 應大於 0")
+        print("e-hentai 總筆數：\(result.totalResults)")
+    }
+
+    func test_fetchGalleryList_search_returnsResults() async throws {
+        let result = try await svc.fetchGalleryList(search: "manga")
+        XCTAssertGreaterThan(result.galleries.count, 0, "搜尋 'manga' 應有結果")
+    }
+
+    func test_fetchGalleryList_nextPage_differentFromFirst() async throws {
+        let page1 = try await svc.fetchGalleryList()
+        guard let cursor = page1.nextCursor else {
+            throw XCTSkip("首頁沒有 nextCursor，無法測試翻頁")
+        }
+        let page2 = try await svc.fetchGalleryList(next: cursor)
+        XCTAssertGreaterThan(page2.galleries.count, 0, "第2頁應有結果")
+        let ids1 = Set(page1.galleries.map(\.id))
+        let ids2 = Set(page2.galleries.map(\.id))
+        XCTAssertTrue(ids1.isDisjoint(with: ids2), "第1頁與第2頁 ID 不應重疊")
+    }
+
+    func test_fetchGalleryList_print() async throws {
+        let result = try await svc.fetchGalleryList()
+        print("=== EHentai 首頁前 5 筆 ===")
+        for g in result.galleries.prefix(5) {
+            print("  id=\(g.id) token=\(g.token) title=\(g.title.prefix(40))")
+        }
+        print("nextCursor=\(result.nextCursor ?? "nil"), total=\(result.totalResults)")
+    }
+
+    // MARK: - fetchImagePageURLs
+
+    func test_fetchImagePageURLs_returnsURLs() async throws {
+        let galleryURL = try await firstGalleryURL()
+        let urls = try await svc.fetchImagePageURLs(galleryURL: galleryURL)
+        XCTAssertGreaterThan(urls.count, 0, "圖庫應有圖片頁面 URL")
+        if let first = urls.first {
+            XCTAssertTrue(first.contains("e-hentai.org/s/"), "URL 應為圖片頁面格式")
+            print("圖庫圖片頁數：\(urls.count)，第1頁：\(first)")
+        }
+    }
+
+    func test_fetchImagePageURLs_noDuplicates() async throws {
+        let galleryURL = try await firstGalleryURL()
+        let urls = try await svc.fetchImagePageURLs(galleryURL: galleryURL)
+        let unique = Set(urls)
+        XCTAssertEqual(urls.count, unique.count, "圖片頁面 URL 不應有重複")
+    }
+
+    // MARK: - fetchGalleryTitle
+
+    func test_fetchGalleryTitle_returnsNonEmpty() async throws {
+        let galleryURL = try await firstGalleryURL()
+        let title = try await svc.fetchGalleryTitle(galleryURL: galleryURL)
+        XCTAssertFalse(title.isEmpty, "應能取得圖庫標題")
+        print("圖庫標題：\(title)")
+    }
+
+    // MARK: - fetchImageURL
+
+    func test_fetchImageURL_returnsHTTPS() async throws {
+        let galleryURL = try await firstGalleryURL()
+        let pageURLs = try await svc.fetchImagePageURLs(galleryURL: galleryURL)
+        let firstPage = try XCTUnwrap(pageURLs.first, "圖庫應有至少 1 個圖片頁面")
+        let url = try await svc.fetchImageURL(pageURL: firstPage)
+        XCTAssertEqual(url.scheme, "https", "圖片 URL scheme 應為 https")
+        XCTAssertFalse(url.absoluteString.isEmpty)
+        print("圖片 URL：\(url)")
+    }
+}

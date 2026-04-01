@@ -4,7 +4,10 @@ struct BookmarkView: View {
     @ObservedObject var store: BookmarkStore
     let onSelect: (Gallery) -> Void
 
-    @ObservedObject private var sourceMgr = SourceManager.shared
+    @ObservedObject private var sourceMgr  = SourceManager.shared
+    @ObservedObject private var updateStore = ChapterUpdateStore.shared
+    @ObservedObject private var progressStore = ReadingProgressStore.shared
+    @State private var isRefreshing = false
     private let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)]
 
     private var filtered: [Gallery] {
@@ -25,14 +28,64 @@ struct BookmarkView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(filtered) { gallery in
-                        BookmarkCard(gallery: gallery, onSelect: onSelect, store: store)
+            VStack(spacing: 0) {
+                // 更新提示 banner
+                let newCount = filtered.filter { (updateStore.newChapterCounts[$0.id] ?? 0) > 0 }.count
+                if newCount > 0 {
+                    HStack(spacing: 6) {
+                        Image(systemName: "bell.badge.fill")
+                            .foregroundColor(.orange)
+                        Text("\(newCount) 部漫畫有新章節")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        if isRefreshing {
+                            ProgressView().scaleEffect(0.7)
+                        }
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.12))
+                    Divider()
                 }
-                .padding(10)
+
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(filtered) { gallery in
+                            BookmarkCard(gallery: gallery, onSelect: onSelect, store: store)
+                        }
+                    }
+                    .padding(10)
+                }
             }
+            .task(id: sourceMgr.activeSourceID) { await refreshAll() }
+            .onChange(of: store.bookmarks.count) { _, _ in
+                Task { await refreshAll() }
+            }
+        }
+    }
+
+    // MARK: - 後台刷新章節更新狀態
+
+    private func refreshAll() async {
+        let galleries = filtered.filter {
+            SourceManager.shared.source(for: $0.sourceID).hasChapters
+        }
+        guard !galleries.isEmpty else { return }
+        isRefreshing = true
+        await withTaskGroup(of: Void.self) { group in
+            for gallery in galleries {
+                group.addTask { await refreshOne(gallery) }
+            }
+        }
+        isRefreshing = false
+    }
+
+    private func refreshOne(_ gallery: Gallery) async {
+        let source = SourceManager.shared.source(for: gallery.sourceID)
+        guard let chapters = try? await source.fetchChapters(gallery: gallery) else { return }
+        let lastRead = progressStore.lastRead(galleryID: gallery.id)
+        await MainActor.run {
+            updateStore.update(galleryID: gallery.id, chapters: chapters, lastRead: lastRead)
         }
     }
 }
@@ -45,6 +98,9 @@ struct BookmarkCard: View {
     let store: BookmarkStore
     @ObservedObject private var downloads = DownloadManager.shared
     @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var updateStore = ChapterUpdateStore.shared
+
+    private var newCount: Int { updateStore.newChapterCounts[gallery.id] ?? 0 }
 
     var body: some View {
         let dlState = downloads.state(for: gallery)
@@ -72,6 +128,26 @@ struct BookmarkCard: View {
 
             // 左上角：下載狀態
             downloadBadge(state: dlState)
+
+            // 底部：新章節提示條
+            if newCount > 0 {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "bell.badge.fill")
+                            .font(.system(size: 10))
+                        Text(newCount == 1 ? "有新章節" : "新 \(newCount) 章")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.orange)
+                }
+                .cornerRadius(8, corners: [.bottomLeft, .bottomRight])
+                .allowsHitTesting(false)
+            }
         }
         // 下載進度條（疊在卡片底部）
         .overlay(alignment: .bottom) {

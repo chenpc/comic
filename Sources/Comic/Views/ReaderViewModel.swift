@@ -220,16 +220,25 @@ final class ReaderViewModel: ObservableObject {
         currentIndex = index
         isLoading = true
         error = nil
+        // Snapshot arrays at the start to avoid race condition if loadChapter/loadGallery replaces them
+        let snapshotLocal   = localImageURLs
+        let snapshotDirect  = directImageURLs
+        let snapshotPages   = imagePageURLs
+        let localMode       = isLocalFile
+        rlog.info("navigate idx=\(index)/\(self.totalPages) isLocal=\(localMode) directURLs=\(snapshotDirect.count) pageURLs=\(snapshotPages.count)")
 
         do {
             let img: NSImage?
-            if isLocalFile {
-                img = try await loadLocalImage(at: index)
-            } else if !directImageURLs.isEmpty {
-                img = await ImageLoader.shared.image(for: directImageURLs[index], referer: imageReferer)
+            if localMode {
+                guard index < snapshotLocal.count else { return }
+                img = try await loadLocalImage(url: snapshotLocal[index])
+            } else if !snapshotDirect.isEmpty {
+                guard index < snapshotDirect.count else { return }
+                img = await ImageLoader.shared.image(for: snapshotDirect[index], sourceID: currentGallery?.sourceID ?? .manhuagui)
             } else {
-                let imageURL = try await resolveImageURL(at: index)
-                img = await ImageLoader.shared.image(for: imageURL, referer: "https://e-hentai.org")
+                guard index < snapshotPages.count else { return }
+                let imageURL = try await resolveImageURL(pageURL: snapshotPages[index])
+                img = await ImageLoader.shared.image(for: imageURL, sourceID: .ehentai)
             }
 
             guard currentIndex == index else { return }
@@ -257,8 +266,7 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
-    private func loadLocalImage(at index: Int) async throws -> NSImage? {
-        let url = localImageURLs[index]
+    private func loadLocalImage(url: URL) async throws -> NSImage? {
         return await Task.detached {
             guard let data = try? Data(contentsOf: url) else { return nil }
             if let img = NSImage(data: data) { return img }
@@ -270,8 +278,7 @@ final class ReaderViewModel: ObservableObject {
         }.value
     }
 
-    private func resolveImageURL(at index: Int) async throws -> URL {
-        let pageURL = imagePageURLs[index]
+    private func resolveImageURL(pageURL: String) async throws -> URL {
         if let cached = imageURLCache[pageURL] { return cached }
         let url = try await EHentaiService.shared.fetchImageURL(pageURL: pageURL)
         imageURLCache[pageURL] = url
@@ -281,15 +288,15 @@ final class ReaderViewModel: ObservableObject {
     /// 到達最後一頁後，等待 prefetch 完成，再確認全部快取後打包
     private func scheduleAutoCBZCheck() {
         guard let gallery = currentGallery else {
-            rlog.warning("scheduleAutoCBZCheck: no currentGallery"); return
+            rlog.error("scheduleAutoCBZCheck: no currentGallery"); return
         }
         guard let chapter = currentChapter else {
-            rlog.warning("scheduleAutoCBZCheck: no currentChapter"); return
+            rlog.error("scheduleAutoCBZCheck: no currentChapter"); return
         }
         guard BookmarkStore.shared.isBookmarked(gallery) else {
-            rlog.info("scheduleAutoCBZCheck: skip – not bookmarked (\(gallery.title))"); return
+            rlog.error("scheduleAutoCBZCheck: skip – not bookmarked (\(gallery.title))"); return
         }
-        rlog.info("scheduleAutoCBZCheck: \(chapter.title) urls=\(self.directImageURLs.count)")
+        rlog.error("scheduleAutoCBZCheck: \(chapter.title) urls=\(self.directImageURLs.count)")
         let urls = directImageURLs
         let ch = chapter
         let g = gallery
@@ -326,11 +333,11 @@ final class ReaderViewModel: ObservableObject {
             }
         } else if !directImageURLs.isEmpty {
             let snapshotDirect = directImageURLs
-            let referer = imageReferer
+            let sid = currentGallery?.sourceID ?? .manhuagui
             Task {
                 let end = min(index + 1 + count, snapshotDirect.count)
                 for i in (index + 1)..<end {
-                    await ImageLoader.shared.prefetch(url: snapshotDirect[i], referer: referer)
+                    await ImageLoader.shared.prefetch(url: snapshotDirect[i], sourceID: sid)
                 }
                 let remaining = count - (end - index - 1)
                 if remaining > 0, let next = nextChapterInList() {
@@ -347,9 +354,9 @@ final class ReaderViewModel: ObservableObject {
                     if imageURLCache[pageURL] == nil,
                        let url = try? await EHentaiService.shared.fetchImageURL(pageURL: pageURL) {
                         imageURLCache[pageURL] = url
-                        await ImageLoader.shared.prefetch(url: url)
+                        await ImageLoader.shared.prefetch(url: url, sourceID: .ehentai)
                     } else if let url = imageURLCache[pageURL] {
-                        await ImageLoader.shared.prefetch(url: url)
+                        await ImageLoader.shared.prefetch(url: url, sourceID: .ehentai)
                     }
                 }
                 // E-Hentai 不跨章節預讀（無章節概念）
@@ -359,18 +366,10 @@ final class ReaderViewModel: ObservableObject {
 
     /// 預讀下一集的前 N 張圖
     private func prefetchNextChapter(_ chapter: Chapter, count: Int) async {
-        let sourceID = currentGallery?.sourceID ?? .manhuagui
-        guard let urls = try? await SourceManager.shared.source(for: sourceID).fetchImageURLs(url: chapter.url) else { return }
+        let sid = currentGallery?.sourceID ?? .manhuagui
+        guard let urls = try? await SourceManager.shared.source(for: sid).fetchImageURLs(url: chapter.url) else { return }
         for url in urls.prefix(count) {
-            await ImageLoader.shared.prefetch(url: url, referer: imageReferer)
-        }
-    }
-
-    private var imageReferer: String {
-        switch currentGallery?.sourceID {
-        case .manhuaren:  return "https://www.manhuaren.com/"
-        case .eightcomic: return "https://www.8comic.com/"
-        default:          return "https://tw.manhuagui.com"
+            await ImageLoader.shared.prefetch(url: url, sourceID: sid)
         }
     }
 }

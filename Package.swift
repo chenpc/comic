@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Comic",
-            path: "Sources/Comic"
+            path: "Sources/Comic",
+            linkerSettings: [.linkedFramework("NetFS")]
         ),
         .testTarget(
             name: "ComicTests",
@@ -17,7 +18,7 @@ let package = Package(
         .target(
             name: "ComicLib",
             path: "Sources/ComicLib",
-            linkerSettings: [.linkedFramework("SwiftUI")]
+            linkerSettings: [.linkedFramework("SwiftUI"), .linkedFramework("NetFS")]
         ),
     ]
 )

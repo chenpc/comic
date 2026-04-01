@@ -4,14 +4,16 @@ struct ContentView: View {
     @StateObject private var readerVM = ReaderViewModel()
     @ObservedObject private var bookmarks = BookmarkStore.shared
     @ObservedObject private var sourceMgr = SourceManager.shared
+    @ObservedObject private var chapterUpdates = ChapterUpdateStore.shared
     @State private var selectedGallery: Gallery?
     @State private var showReader = false
     @State private var showChapterList = false
     @State private var sidebarTab: SidebarTab = .browse
     @State private var isFullscreen = false
     @State private var libraryGallery: Gallery?   // library 模式下選中的漫畫
+    @State private var authorSearchTrigger: String? = nil
 
-    enum SidebarTab { case browse, bookmarks, library, settings }
+    enum SidebarTab { case browse, bookmarks, library, downloads, settings }
 
     var body: some View {
         // 全螢幕閱讀時跳過 NavigationSplitView，確保 toolbar 完全消失
@@ -26,10 +28,17 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 // 分頁按鈕 + 來源下拉選單
                 HStack(spacing: 0) {
-                    tabButton(title: "瀏覽", icon: "rectangle.grid.2x2", tab: .browse) { libraryGallery = nil }
-                    tabButton(title: "書籤", icon: "bookmark", tab: .bookmarks) { libraryGallery = nil }
+                    tabButton(title: "瀏覽", icon: "rectangle.grid.2x2", tab: .browse) {
+                        if libraryGallery != nil { libraryGallery = nil; showChapterList = false; selectedGallery = nil }
+                    }
+                    tabButton(title: "書籤", icon: "bookmark", tab: .bookmarks, badge: chapterUpdates.totalNewCount) {
+                        if libraryGallery != nil { libraryGallery = nil; showChapterList = false; selectedGallery = nil }
+                    }
                     tabButton(title: "Library", icon: "internaldrive", tab: .library) {}
-                    tabButton(title: "設定", icon: "gearshape", tab: .settings) { libraryGallery = nil }
+                    tabButton(title: "下載", icon: "arrow.down.circle", tab: .downloads) {}
+                    tabButton(title: "設定", icon: "gearshape", tab: .settings) {
+                        if libraryGallery != nil { libraryGallery = nil; showChapterList = false; selectedGallery = nil }
+                    }
 
                     Divider().frame(width: 1, height: 20).padding(.horizontal, 4)
 
@@ -51,7 +60,7 @@ struct ContentView: View {
                 Divider()
 
                 switch sidebarTab {
-                case .browse:    GalleryListView(onSelect: gallerySelected)
+                case .browse:    GalleryListView(onSelect: gallerySelected, authorSearchTrigger: authorSearchTrigger)
                 case .bookmarks: BookmarkView(store: bookmarks, onSelect: gallerySelected)
                 case .library:
                     LibraryView(
@@ -66,6 +75,7 @@ struct ContentView: View {
                             openLibraryChapter(chapter, gallery: gallery, allChapters: allChapters, startPage: startPage)
                         }
                     )
+                case .downloads: DownloadQueueView()
                 case .settings:  SettingsView()
                 }
             }
@@ -87,10 +97,16 @@ struct ContentView: View {
                     )
                     .id(gallery.id)
                 } else {
-                    ChapterListView(gallery: gallery, onSelect: { ch, all, page in openChapter(ch, allChapters: all, startPage: page) }, onBack: {
-                        showChapterList = false
-                        showReader = false
-                    })
+                    ChapterListView(
+                        gallery: gallery,
+                        onSelect: { ch, all, page in openChapter(ch, allChapters: all, startPage: page) },
+                        onBack: { showChapterList = false; showReader = false },
+                        onAuthorTap: { author in
+                            authorSearchTrigger = author
+                            sidebarTab = .browse
+                            showChapterList = false
+                        }
+                    )
                     .id(gallery.id)
                 }
             } else if showReader {
@@ -206,22 +222,35 @@ struct ContentView: View {
         Task { await readerVM.loadChapter(chapter, gallery: gallery, allChapters: allChapters, startPage: startPage) }
     }
 
-    private func tabButton(title: String, icon: String, tab: SidebarTab, extra: (() -> Void)? = nil) -> some View {
+    private func tabButton(title: String, icon: String, tab: SidebarTab, badge: Int = 0, extra: (() -> Void)? = nil) -> some View {
         Button {
             sidebarTab = tab
             extra?()
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: sidebarTab == tab ? "\(icon).fill" : icon)
-                Text(title)
+            ZStack(alignment: .topTrailing) {
+                HStack(spacing: 4) {
+                    Image(systemName: sidebarTab == tab ? "\(icon).fill" : icon)
+                    Text(title)
+                }
+                .font(.system(size: 12, weight: sidebarTab == tab ? .semibold : .regular))
+                .foregroundColor(sidebarTab == tab ? .accentColor : .secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(sidebarTab == tab ? Color.accentColor.opacity(0.12) : .clear)
+                .cornerRadius(6)
+                .contentShape(Rectangle())
+
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(Color.orange)
+                        .clipShape(Capsule())
+                        .offset(x: 2, y: -2)
+                }
             }
-            .font(.system(size: 12, weight: sidebarTab == tab ? .semibold : .regular))
-            .foregroundColor(sidebarTab == tab ? .accentColor : .secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 5)
-            .background(sidebarTab == tab ? Color.accentColor.opacity(0.12) : .clear)
-            .cornerRadius(6)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

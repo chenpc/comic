@@ -61,6 +61,14 @@ final class DownloadManager: ObservableObject {
     @Published var chapterStates: [String: DownloadState] = [:]
     private var chapterDownloadTasks: [String: Task<Void, Never>] = [:]
 
+    // 供下載佇列頁面使用：記錄任務的 chapter/gallery 資訊與入隊順序
+    @Published private(set) var chapterMeta: [String: (chapter: Chapter, gallery: Gallery, order: Int)] = [:]
+    @Published private(set) var galleryMeta: [String: (gallery: Gallery, order: Int)] = [:]
+    private var enqueueCounter = 0
+
+    // 所有來源一次只下載一集（避免並行請求過多）
+    private let chapterSem = AsyncSemaphore(limit: 1)
+
     // MARK: - 路徑（依來源分資料夾）
 
     // 漫畫名稱資料夾：{library}/manhuagui/{safeTitle}/
@@ -96,7 +104,7 @@ final class DownloadManager: ObservableObject {
             .filter { $0.pathExtension.lowercased() == "cbz" }.count
     }
 
-    func safeFilename(_ name: String) -> String {
+    nonisolated func safeFilename(_ name: String) -> String {
         let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
         return name.components(separatedBy: invalid).joined(separator: "_")
     }
@@ -112,7 +120,7 @@ final class DownloadManager: ObservableObject {
         stagingDir(for: gallery)?.appendingPathComponent("progress.json")
     }
 
-    func imageFile(stagingDir: URL, index: Int, ext: String) -> URL {
+    nonisolated func imageFile(stagingDir: URL, index: Int, ext: String) -> URL {
         stagingDir.appendingPathComponent(String(format: "%04d.%@", index + 1, ext))
     }
 
@@ -166,6 +174,8 @@ final class DownloadManager: ObservableObject {
         }
 
         states[gallery.id] = .queued
+        enqueueCounter += 1
+        galleryMeta[gallery.id] = (gallery: gallery, order: enqueueCounter)
         let task = Task { await performDownload(gallery: gallery) }
         downloadTasks[gallery.id] = task
     }
@@ -210,19 +220,29 @@ final class DownloadManager: ObservableObject {
         let current = chapterStates[key] ?? .notDownloaded
         guard !current.isActive else { return }
         chapterStates[key] = .queued
+        enqueueCounter += 1
+        chapterMeta[key] = (chapter: chapter, gallery: gallery, order: enqueueCounter)
         let task = Task { await performChapterDownload(chapter: chapter, gallery: gallery) }
         chapterDownloadTasks[key] = task
     }
 
     /// 瀏覽完一章後，從磁碟快取打包 CBZ（不重新下載）
     func autoCacheToCBZ(chapter: Chapter, gallery: Gallery, imageURLs: [URL]) async {
-        guard SettingsStore.shared.libraryURL != nil else { return }
-        guard !imageURLs.isEmpty else { return }
-        guard !isChapterDownloaded(chapter: chapter, gallery: gallery) else { return }
+        guard SettingsStore.shared.libraryURL != nil else {
+            dlog("autoCacheToCBZ: skip – no libraryURL"); return
+        }
+        guard !imageURLs.isEmpty else {
+            dlog("autoCacheToCBZ: skip – no imageURLs"); return
+        }
+        guard !isChapterDownloaded(chapter: chapter, gallery: gallery) else {
+            dlog("autoCacheToCBZ: skip – already downloaded \(chapter.title)"); return
+        }
 
         let key = chapter.url.absoluteString
         // 避免重複執行
-        if let s = chapterStates[key], s.isActive || s == .completed || s == .packaging { return }
+        if let s = chapterStates[key], s.isActive || s == .completed || s == .packaging {
+            dlog("autoCacheToCBZ: skip – state=\(s) \(chapter.title)"); return
+        }
 
         // 確認所有圖片都已在磁碟快取
         let allCached = await ImageLoader.shared.allDiskCached(urls: imageURLs)
@@ -268,6 +288,18 @@ final class DownloadManager: ObservableObject {
         chapterDownloadTasks[key]?.cancel()
         chapterDownloadTasks[key] = nil
         chapterStates[key] = .notDownloaded
+    }
+
+    func pauseChapterDownload(chapter: Chapter) {
+        cancelChapterDownload(chapter: chapter)
+    }
+
+    func pauseAllChapterDownloads(chapters: [Chapter]) {
+        for chapter in chapters {
+            let key = chapter.url.absoluteString
+            let state = chapterStates[key] ?? .notDownloaded
+            if state.isActive { pauseChapterDownload(chapter: chapter) }
+        }
     }
 
     /// App 啟動時呼叫，掃描未完成的下載並自動恢復
@@ -398,26 +430,32 @@ final class DownloadManager: ObservableObject {
         downloadTasks[gallery.id] = nil
     }
 
-    /// 章節型來源（漫畫人/漫畫櫃）的書籤整本下載：取章節列表，逐章 downloadChapter
+    /// 章節型來源整本下載：循序等待每集完成後再下載下一集
     private func performChapterBasedDownload(gallery: Gallery) async {
         dlog("performChapterBasedDownload START \(gallery.id)")
         do {
             let chapters: [Chapter]
             switch gallery.sourceID {
-            case .manhuagui: chapters = try await ManhuaguiService.shared.fetchChapters(comicURL: gallery.galleryURL)
-            case .manhuaren: chapters = try await ManhuarenService.shared.fetchChapters(galleryURL: gallery.galleryURL)
+            case .manhuagui:  chapters = try await ManhuaguiService.shared.fetchChapters(comicURL: gallery.galleryURL)
+            case .manhuaren:  chapters = try await ManhuarenService.shared.fetchChapters(galleryURL: gallery.galleryURL)
+            case .eightcomic: chapters = try await EightcomicService.shared.fetchChapters(mangaURL: gallery.galleryURL)
             default: chapters = []
             }
             guard !chapters.isEmpty else {
                 await MainActor.run { states[gallery.id] = .failed("無章節") }
                 return
             }
-            await MainActor.run { states[gallery.id] = .downloading(page: 0, total: chapters.count) }
-            for (i, ch) in chapters.enumerated() {
+            let total = chapters.count
+            var done = 0
+            await MainActor.run { states[gallery.id] = .downloading(page: 0, total: total) }
+            for ch in chapters {
                 if Task.isCancelled { break }
-                if isChapterDownloaded(chapter: ch, gallery: gallery) { continue }
-                await MainActor.run { states[gallery.id] = .downloading(page: i + 1, total: chapters.count) }
-                downloadChapter(chapter: ch, gallery: gallery)
+                if isChapterDownloaded(chapter: ch, gallery: gallery) { done += 1; continue }
+                // 標記排隊中，循序等待此集完成再繼續
+                await MainActor.run { chapterStates[ch.url.absoluteString] = .queued }
+                await performChapterDownload(chapter: ch, gallery: gallery)
+                done += 1
+                await MainActor.run { states[gallery.id] = .downloading(page: done, total: total) }
             }
             await MainActor.run { states[gallery.id] = .completed }
         } catch is CancellationError {
@@ -429,71 +467,64 @@ final class DownloadManager: ObservableObject {
         downloadTasks[gallery.id] = nil
     }
 
-    private func performChapterDownload(chapter: Chapter, gallery: Gallery) async {
+    private nonisolated func performChapterDownload(chapter: Chapter, gallery: Gallery) async {
         let key = chapter.url.absoluteString
+
+        // 所有來源：等待 semaphore，確保一次只下載一集
+        await chapterSem.wait()
+        defer { Task { await self.chapterSem.signal() } }
         dlog("performChapterDownload START \(chapter.id) '\(chapter.title)'")
 
         do {
             let imageURLs: [URL]
             switch gallery.sourceID {
-            case .manhuagui: imageURLs = try await ManhuaguiService.shared.fetchChapterImages(chapterURL: chapter.url)
-            case .manhuaren: imageURLs = try await ManhuarenService.shared.fetchChapterImages(chapterURL: chapter.url)
+            case .manhuagui:  imageURLs = try await ManhuaguiService.shared.fetchChapterImages(chapterURL: chapter.url)
+            case .manhuaren:  imageURLs = try await ManhuarenService.shared.fetchChapterImages(chapterURL: chapter.url)
+            case .eightcomic: imageURLs = try await EightcomicService.shared.fetchChapterImages(chapterURL: chapter.url)
             default: throw DownloadError.noImages
             }
             let total = imageURLs.count
             guard total > 0 else { throw DownloadError.noImages }
 
-            guard let folder = comicFolder(for: gallery) else { throw DownloadError.noImages }
+            let folder = await MainActor.run { comicFolder(for: gallery) }
+            guard let folder else { throw DownloadError.noImages }
             let safe = safeFilename(chapter.title)
             let stagingDir = folder.appendingPathComponent(".staging_\(chapter.id)")
             try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
+            let fetcher = ImageLoader.fetchers[gallery.sourceID]
             for (i, imageURL) in imageURLs.enumerated() {
                 if Task.isCancelled { throw CancellationError() }
-                await MainActor.run { chapterStates[key] = .downloading(page: i + 1, total: total) }
+                await MainActor.run { self.chapterStates[key] = .downloading(page: i + 1, total: total) }
 
-                var lastError: Error?
-                for attempt in 1...3 {
-                    do {
-                        let referer: String
-                        switch gallery.sourceID {
-                        case .manhuaren:  referer = "https://www.manhuaren.com/"
-                        case .eightcomic: referer = "https://www.8comic.com/"
-                        default:          referer = "https://tw.manhuagui.com"
-                        }
-                        let data = try await EHentaiService.shared.fetchImageData(
-                            url: imageURL, referer: referer)
-                        let ext = imageURL.pathExtension.isEmpty ? "jpg" : imageURL.pathExtension
-                        try data.write(to: imageFile(stagingDir: stagingDir, index: i, ext: ext))
-                        lastError = nil; break
-                    } catch {
-                        lastError = error
-                        if attempt < 3 {
-                            try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
-                        }
-                    }
+                let data: Data
+                if let fetcher {
+                    data = try await fetcher(imageURL)
+                } else {
+                    data = try await EHentaiService.shared.fetchImageData(url: imageURL)
                 }
-                if let err = lastError { throw err }
+                let ext = imageURL.pathExtension.isEmpty ? "jpg" : imageURL.pathExtension
+                try data.write(to: imageFile(stagingDir: stagingDir, index: i, ext: ext))
             }
 
-            await MainActor.run { chapterStates[key] = .packaging }
+            await MainActor.run { self.chapterStates[key] = .packaging }
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let cbzDest = folder.appendingPathComponent("\(safe).cbz")
             try await packageAsCBZ(sourceDir: stagingDir, destination: cbzDest)
             try? FileManager.default.removeItem(at: stagingDir)
-            await MainActor.run { chapterStates[key] = .completed }
+            await MainActor.run { self.chapterStates[key] = .completed }
             dlog("  COMPLETED chapter \(chapter.id)")
 
         } catch is CancellationError {
-            await MainActor.run { chapterStates[key] = .notDownloaded }
+            await MainActor.run { self.chapterStates[key] = .notDownloaded }
         } catch {
             dlog("  FAILED chapter \(chapter.id): \(error)")
-            await MainActor.run { chapterStates[key] = .failed(error.localizedDescription) }
+            await MainActor.run { self.chapterStates[key] = .failed(error.localizedDescription) }
         }
-        chapterDownloadTasks[key] = nil
+        await MainActor.run { self.chapterDownloadTasks[key] = nil }
     }
 
-    private func packageAsCBZ(sourceDir: URL, destination: URL) async throws {
+    private nonisolated func packageAsCBZ(sourceDir: URL, destination: URL) async throws {
         try? FileManager.default.removeItem(at: destination)
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
@@ -587,6 +618,37 @@ final class DownloadManager: ObservableObject {
             case .unzipFailed:   return "解壓失敗"
             case .notDownloaded: return "尚未下載"
             }
+        }
+    }
+}
+
+// MARK: - AsyncSemaphore
+
+/// 簡易 async semaphore（用於限制並行下載數量）
+actor AsyncSemaphore {
+    private let limit: Int
+    private var count: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        self.limit = limit
+        self.count = limit
+    }
+
+    func wait() async {
+        if count > 0 {
+            count -= 1
+        } else {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+    }
+
+    func signal() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            count += 1
         }
     }
 }

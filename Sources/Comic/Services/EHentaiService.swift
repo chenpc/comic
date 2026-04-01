@@ -1,10 +1,11 @@
 import Foundation
 
 
-final class EHentaiService {
+final class EHentaiService: ComicService {
     static let shared = EHentaiService()
 
-    private let session: URLSession
+    let session: URLSession
+    let referer = "https://e-hentai.org"
 
     init() {
         let config = URLSessionConfiguration.default
@@ -65,10 +66,7 @@ final class EHentaiService {
         request.httpMethod = "POST"
         request.httpBody = bodyData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
+        request.setValue(ComicServiceConstants.userAgentShort, forHTTPHeaderField: "User-Agent")
 
         let (data, _) = try await session.data(for: request)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -116,12 +114,12 @@ final class EHentaiService {
     /// 從圖片頁面取得實際圖片網址
     func fetchImageURL(pageURL: String) async throws -> URL {
         guard let url = URL(string: pageURL) else {
-            throw ServiceError.invalidURL
+            throw ComicServiceError.invalidURL
         }
         let html = try await fetchHTML(url: url)
         guard let imageURLString = parseImageURL(from: html),
               let imageURL = URL(string: imageURLString) else {
-            throw ServiceError.imageNotFound
+            throw ComicServiceError.imageNotFound
         }
         return imageURL
     }
@@ -143,7 +141,7 @@ final class EHentaiService {
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            throw ServiceError.badResponse
+            throw ComicServiceError.badResponse
         }
         return String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
@@ -152,10 +150,7 @@ final class EHentaiService {
 
     private func makeRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url)
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
+        request.setValue(ComicServiceConstants.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://e-hentai.org", forHTTPHeaderField: "Referer")
         request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
@@ -259,21 +254,8 @@ final class EHentaiService {
         }
     }
 
-    // MARK: - Errors
-
-    enum ServiceError: Error, LocalizedError {
-        case badResponse
-        case invalidURL
-        case imageNotFound
-
-        var errorDescription: String? {
-            switch self {
-            case .badResponse: return "伺服器回應錯誤"
-            case .invalidURL: return "無效的網址"
-            case .imageNotFound: return "找不到圖片"
-            }
-        }
-    }
+    // 向後相容 typealias
+    typealias ServiceError = ComicServiceError
 }
 
 private extension Array where Element: Hashable {

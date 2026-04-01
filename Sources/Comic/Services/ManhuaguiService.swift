@@ -15,40 +15,48 @@ private func mlog(_ msg: String) {
     }
 }
 
-final class ManhuaguiService {
+final class ManhuaguiService: ComicService {
     static let shared = ManhuaguiService()
 
-    private let session: URLSession
+    let session: URLSession
+    let referer = "https://tw.manhuagui.com"
+    /// 漫畫櫃限速 3 req/s
+    let throttle: RequestThrottle? = ManhuaguiThrottle.shared
 
     init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest  = 30
         config.timeoutIntervalForResource = 300
-        config.httpAdditionalHeaders = [
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
-            "Referer":    "https://tw.manhuagui.com"
-        ]
         session = URLSession(configuration: config)
     }
 
     // MARK: - 列表
 
     /// 取得漫畫列表（頁碼 1-based）
-    /// filterSlugs: 依序組合的 slug，如 ["japan", "rexue"]，空陣列代表全部
-    func fetchComicList(page: Int, search: String, filterSlugs: [String] = []) async throws -> (galleries: [Gallery], totalPages: Int) {
+    /// filterSlugs: 依序組合的篩選 slug，如 ["japan", "rexue"]，空陣列代表全部
+    /// sort: 排序 slug，如 "update"、"view"、"score"；空字串代表預設
+    func fetchComicList(page: Int, search: String, filterSlugs: [String] = [], sort: String = "") async throws -> (galleries: [Gallery], totalPages: Int) {
         let url: URL
         if !search.isEmpty {
             // 搜尋模式
             let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? search
-            var comps = URLComponents(string: "https://tw.manhuagui.com/s/\(encoded)/")!
-            if page > 1 { comps.queryItems = [URLQueryItem(name: "page", value: "\(page)")] }
-            url = comps.url!
+            if page <= 1 {
+                url = URL(string: "https://tw.manhuagui.com/s/\(encoded).html")!
+            } else {
+                url = URL(string: "https://tw.manhuagui.com/s/\(encoded)_p\(page).html")!
+            }
+        } else if !sort.isEmpty {
+            // 有排序：排序 slug 作為最後一段，使用 .html 後綴
+            // /list/{sort}.html 或 /list/{filters}/{sort}.html
+            let prefix = filterSlugs.isEmpty ? "" : filterSlugs.joined(separator: "/") + "/"
+            let terminal = page <= 1 ? "\(sort).html" : "\(sort)_p\(page).html"
+            url = URL(string: "https://tw.manhuagui.com/list/\(prefix)\(terminal)")!
         } else if filterSlugs.isEmpty {
-            // 無篩選
+            // 無篩選、無排序
             let path = page <= 1 ? "/list/view.html" : "/list/view_p\(page).html"
             url = URL(string: "https://tw.manhuagui.com\(path)")!
         } else {
-            // 有篩選：/list/{slug1}/{slug2}/  分頁：最後一個 slug 加 _p{N}
+            // 有篩選、無排序：/list/{slug1}/{slug2}/  分頁：最後一個 slug 加 _p{N}
             if page <= 1 {
                 let path = "/list/" + filterSlugs.joined(separator: "/") + "/"
                 url = URL(string: "https://tw.manhuagui.com\(path)")!
@@ -103,14 +111,18 @@ final class ManhuaguiService {
 
     // MARK: - Networking
 
-    private func fetchHTML(url: URL) async throws -> String {
-        let (data, response) = try await session.data(from: url)
+    // 覆寫：使用精簡版 User-Agent（漫畫櫃防爬蟲偵測）；throttle 已由 protocol default 透過 self.throttle 處理
+    func fetchHTML(url: URL) async throws -> String {
+        await throttle?.acquire()
+        var request = URLRequest(url: url)
+        request.setValue(ComicServiceConstants.userAgentShort, forHTTPHeaderField: "User-Agent")
+        request.setValue(referer, forHTTPHeaderField: "Referer")
+        let (data, response) = try await session.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         mlog("  fetchHTML \(url.absoluteString) status=\(statusCode) bytes=\(data.count)")
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        guard (200...299).contains(statusCode) else {
             mlog("  badResponse: status=\(statusCode)")
-            throw ServiceError.badResponse
+            throw ComicServiceError.badResponse
         }
         return String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
@@ -198,7 +210,7 @@ final class ManhuaguiService {
         guard let script = packerScript else {
             mlog("  no packer script found")
             mlog("  html snippet: \(String(html.prefix(500)))")
-            throw ServiceError.imageDataNotFound
+            throw ComicServiceError.imageDataNotFound
         }
         mlog("  found packer script len=\(script.count)")
 
@@ -236,7 +248,7 @@ final class ManhuaguiService {
         // 找 SMH.imgData({...})
         guard let start = js.range(of: "SMH.imgData("),
               let jsonStart = js.range(of: "{", range: start.upperBound..<js.endIndex) else {
-            throw ServiceError.imageDataNotFound
+            throw ComicServiceError.imageDataNotFound
         }
         // 找對應的右括號
         var depth = 0
@@ -254,13 +266,13 @@ final class ManhuaguiService {
         let jsonStr = String(js[jsonStart.lowerBound..<jsonEnd])
         guard let data = jsonStr.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ServiceError.imageDataNotFound
+            throw ComicServiceError.imageDataNotFound
         }
 
         guard let files  = obj["files"]  as? [String],
               let path   = obj["path"]   as? String,
               let server = obj["server"] as? String else {
-            throw ServiceError.imageDataNotFound
+            throw ComicServiceError.imageDataNotFound
         }
 
         // 簽名參數 sl: { e: Int, m: String }
@@ -275,6 +287,24 @@ final class ManhuaguiService {
             }
             return URL(string: urlStr)
         }
+    }
+
+    // MARK: - 漫畫詳細資料解析
+
+    func parseGalleryDetail(from html: String) -> GalleryDetail? {
+        let author = capture(pattern: #"漫畫作者：</strong>\s*<a[^>]*>([^<]+)</a>"#,
+                             in: html, group: 1).first
+        let desc = capture(pattern: #"<div id="intro-cut">\s*([\s\S]*?)\s*</div>"#,
+                           in: html, group: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .htmlDecoded()
+        guard author != nil || desc != nil else { return nil }
+        return GalleryDetail(author: author, description: desc)
+    }
+
+    func fetchGalleryDetail(comicURL: URL) async throws -> GalleryDetail? {
+        let html = try await fetchHTML(url: comicURL)
+        return parseGalleryDetail(from: html)
     }
 
     // MARK: - Regex Helper
@@ -357,29 +387,28 @@ final class ManhuaguiService {
         return candidate
     }
 
-    // MARK: - Errors
-
-    enum ServiceError: LocalizedError {
-        case badResponse, imageDataNotFound
-        var errorDescription: String? {
-            switch self {
-            case .badResponse:     return "伺服器回應錯誤"
-            case .imageDataNotFound: return "找不到圖片資料"
-            }
-        }
-    }
+    // 向後相容 typealias
+    typealias ServiceError = ComicServiceError
 }
 
 // MARK: - String HTML 解碼
 
-private extension String {
+extension String {
     func htmlDecoded() -> String {
-        var s = self
-        let entities: [(String, String)] = [
-            ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
-            ("&quot;", "\""), ("&#39;", "'"), ("&nbsp;", " ")
-        ]
-        for (e, r) in entities { s = s.replacingOccurrences(of: e, with: r) }
-        return s
+        guard let data = data(using: .utf8),
+              let attributed = try? NSAttributedString(
+                data: data,
+                options: [.documentType: NSAttributedString.DocumentType.html,
+                          .characterEncoding: String.Encoding.utf8.rawValue],
+                documentAttributes: nil) else {
+            // fallback：手動替換常見 entity
+            var s = self
+            for (e, r) in [("&amp;","&"),("&lt;","<"),("&gt;",">"),
+                           ("&quot;","\""),("&#39;","'"),("&nbsp;"," ")] {
+                s = s.replacingOccurrences(of: e, with: r)
+            }
+            return s
+        }
+        return attributed.string
     }
 }
