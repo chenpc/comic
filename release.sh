@@ -60,13 +60,6 @@ codesign --verify --deep --strict "$APP_BUNDLE" && echo "    簽署驗證通過"
 echo "==> 移除 Gatekeeper 隔離旗標"
 xattr -cr "$APP_BUNDLE"
 
-pkill -x "$APP_NAME" 2>/dev/null || true
-sleep 0.3
-
-nohup "$APP_BUNDLE/Contents/MacOS/$APP_NAME" > /tmp/comic.log 2>&1 &
-disown
-
 echo ""
-echo "✓ 完成並已啟動：$APP_BUNDLE"
+echo "✓ 完成：$APP_BUNDLE"
 echo "  大小：$(du -sh "$APP_BUNDLE" | cut -f1)"
-echo "  log: /tmp/comic.log"
