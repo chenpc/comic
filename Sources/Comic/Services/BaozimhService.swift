@@ -111,18 +111,23 @@ final class BaozimhService: ComicService {
     // MARK: - 解析：章節列表
 
     func parseChapters(html: String, slug: String) -> [Chapter] {
-        // 章節連結格式：href="/user/page_direct?comic_id={slug}&section_slot=0&chapter_slot={N}"
-        // 標題在 <span>{title}</span> 內
-        let pattern = #"chapter_slot=(\d+)"[^>]*>\s*<div[^>]*>\s*<span>([^<]+)</span>"#
+        // 實際 HTML：
+        //   href="/user/page_direct?comic_id={slug_with_suffix}&amp;section_slot=0&amp;chapter_slot={N}"
+        //   ...class="comics-chapters__item"...
+        //   <div style="flex: 1;" ...><span data-v-...>{title}</span></div>
+        let pattern = #"href="(/user/page_direct\?[^"]+chapter_slot=(\d+))"[^>]*>\s*<div[^>]*>\s*<span[^>]*>([^<]+)</span>"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators) else { return [] }
         let range = NSRange(html.startIndex..., in: html)
         var chapters: [Chapter] = []
         for m in regex.matches(in: html, range: range) {
             guard let r1 = Range(m.range(at: 1), in: html),
-                  let r2 = Range(m.range(at: 2), in: html) else { continue }
-            let slot  = String(html[r1])
-            let title = String(html[r2]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let chURL = URL(string: "\(base)/comic/chapter/\(slug)/0_\(slot).html")!
+                  let r2 = Range(m.range(at: 2), in: html),
+                  let r3 = Range(m.range(at: 3), in: html) else { continue }
+            let href  = String(html[r1]).replacingOccurrences(of: "&amp;", with: "&")
+            let slot  = String(html[r2])
+            let title = String(html[r3]).trimmingCharacters(in: .whitespacesAndNewlines)
+            // 使用 redirect URL（URLSession 自動跟隨轉向至閱讀頁）
+            guard let chURL = URL(string: "\(base)\(href)") else { continue }
             chapters.append(Chapter(id: "\(slug)/0_\(slot)", title: title, url: chURL, pageCount: nil))
         }
         return chapters

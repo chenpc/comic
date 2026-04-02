@@ -13,7 +13,7 @@ final class MangaDexService: ComicService {
 
     // MARK: - 漫畫列表
 
-    func fetchMangaList(page: Int, search: String, orderBy: String) async throws -> (galleries: [Gallery], total: Int) {
+    func fetchMangaList(page: Int, search: String, orderBy: String, tagUUID: String = "") async throws -> (galleries: [Gallery], total: Int) {
         let limit = 20
         let offset = (page - 1) * limit
         var items: [URLQueryItem] = [
@@ -29,6 +29,9 @@ final class MangaDexService: ComicService {
         case "-rating":        items.append(.init(name: "order[rating]",        value: "desc"))
         case "title":          items.append(.init(name: "order[title]",         value: "asc"))
         default:               items.append(.init(name: "order[updatedAt]",     value: "desc"))
+        }
+        if !tagUUID.isEmpty {
+            items.append(.init(name: "includedTags[]", value: tagUUID))
         }
         if !search.isEmpty {
             items.append(.init(name: "title", value: search))

@@ -70,7 +70,6 @@ final class SourceManager: ObservableObject {
         case .eightcomic: return EightcomicSource.shared
         case .mangadex:   return MangaDexSource.shared
         case .baozimh:    return BaozimhSource.shared
-        case .copymanga:  return CopymangaSource.shared
         }
     }
 

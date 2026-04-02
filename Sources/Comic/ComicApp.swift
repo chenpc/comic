@@ -36,8 +36,7 @@ struct ComicApp: App {
         // 各 source 註冊圖片下載方法（含各自的 throttle / retry / referer）
         for source in [EHentaiSource.shared, ManhuaguiSource.shared,
                        ManhuarenSource.shared, EightcomicSource.shared,
-                       MangaDexSource.shared, BaozimhSource.shared,
-                       CopymangaSource.shared] as [ComicSource] {
+                       MangaDexSource.shared, BaozimhSource.shared] as [ComicSource] {
             let s = source
             ImageLoader.registerFetcher(for: s.sourceID) { url in
                 try await s.fetchImageData(url: url)

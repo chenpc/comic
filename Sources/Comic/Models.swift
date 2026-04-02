@@ -9,7 +9,6 @@ enum SourceID: String, CaseIterable, Identifiable, Codable {
     case eightcomic = "8comic"
     case mangadex   = "mangadex"
     case baozimh    = "baozimh"
-    case copymanga  = "copymanga"
 
     var id: String { rawValue }
 
@@ -21,7 +20,6 @@ enum SourceID: String, CaseIterable, Identifiable, Codable {
         case .eightcomic: return "無限動漫"
         case .mangadex:   return "MangaDex"
         case .baozimh:    return "包子漫畫"
-        case .copymanga:  return "拷貝漫畫"
         }
     }
 
@@ -33,7 +31,6 @@ enum SourceID: String, CaseIterable, Identifiable, Codable {
         case .eightcomic: return "infinity"
         case .mangadex:   return "globe"
         case .baozimh:    return "square.stack"
-        case .copymanga:  return "doc.on.doc"
         }
     }
 }

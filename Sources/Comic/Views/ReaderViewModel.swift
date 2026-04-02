@@ -219,6 +219,7 @@ final class ReaderViewModel: ObservableObject {
     private func navigate(to index: Int) async {
         currentIndex = index
         isLoading = true
+        currentImage = nil
         error = nil
         // Snapshot arrays at the start to avoid race condition if loadChapter/loadGallery replaces them
         let snapshotLocal   = localImageURLs
