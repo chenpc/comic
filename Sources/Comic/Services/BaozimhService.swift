@@ -58,7 +58,19 @@ final class BaozimhService: ComicService {
 
     func fetchImageURLs(chapterURL: URL) async throws -> [URL] {
         let html = try await fetchHTML(url: chapterURL)
-        return parseImageURLs(html: html)
+        let urls = parseImageURLs(html: html)
+        let comicID = URLComponents(url: chapterURL, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "comic_id" })?.value
+        if isPromoChapter(comicID: comicID, imageURLs: urls) {
+            throw ComicServiceError.parseError
+        }
+        return urls
+    }
+
+    /// 若所有圖片均不屬於 comicID，視為推廣章節
+    func isPromoChapter(comicID: String?, imageURLs: [URL]) -> Bool {
+        guard let comicID, !imageURLs.isEmpty else { return false }
+        return !imageURLs.contains(where: { $0.absoluteString.contains("scomic/\(comicID)") })
     }
 
     // MARK: - 解析：漫畫列表
@@ -130,7 +142,12 @@ final class BaozimhService: ComicService {
             guard let chURL = URL(string: "\(base)\(href)") else { continue }
             chapters.append(Chapter(id: "\(slug)/0_\(slot)", title: title, url: chURL, pageCount: nil))
         }
-        return chapters
+        // HTML 最新章節在前，按 chapter_slot 升冪排列（第1話在 index 0）
+        return chapters.sorted {
+            let a = Int($0.id.components(separatedBy: "_").last ?? "0") ?? 0
+            let b = Int($1.id.components(separatedBy: "_").last ?? "0") ?? 0
+            return a < b
+        }
     }
 
     // MARK: - 解析：漫畫詳細

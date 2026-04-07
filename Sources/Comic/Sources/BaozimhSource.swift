@@ -5,6 +5,7 @@ final class BaozimhSource: ComicSource {
     private init() {}
 
     let sourceID: SourceID = .baozimh
+    private let throttle = RequestThrottle(maxPerSecond: 1, maxRetries: 3, retryDelay: 5)
     let supportsSearch      = true
     let hasChapters         = true
     let defaultFilters: [String: String] = ["sort": "1"]
@@ -48,15 +49,17 @@ final class BaozimhSource: ComicSource {
     }
 
     func fetchImageData(url: URL) async throws -> Data {
-        var req = URLRequest(url: url)
-        req.setValue(ComicServiceConstants.userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("https://www.baozimh.com", forHTTPHeaderField: "Referer")
-        let (data, response) = try await BaozimhService.shared.session.data(for: req)
-        guard let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode) else {
-            throw ComicServiceError.badResponse
+        try await throttle.fetchWithRetry {
+            var req = URLRequest(url: url)
+            req.setValue(ComicServiceConstants.userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("https://www.baozimh.com", forHTTPHeaderField: "Referer")
+            let (data, response) = try await BaozimhService.shared.session.data(for: req)
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode) else {
+                throw ComicServiceError.badResponse
+            }
+            return data
         }
-        return data
     }
 
     func fetchGalleryDetail(gallery: Gallery) async -> GalleryDetail? {

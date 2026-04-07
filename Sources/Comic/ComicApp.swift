@@ -41,6 +41,11 @@ struct ComicApp: App {
             ImageLoader.registerFetcher(for: s.sourceID) { url in
                 try await s.fetchImageData(url: url)
             }
+            DownloadManager.register(s.sourceID, handlers: .init(
+                hasChapters: s.hasChapters,
+                fetchChapters: { gallery in try await s.fetchChapters(gallery: gallery) },
+                fetchImageURLs: { url in try await s.fetchImageURLs(url: url) }
+            ))
         }
     }
 

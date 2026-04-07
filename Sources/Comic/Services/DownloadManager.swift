@@ -69,6 +69,24 @@ final class DownloadManager: ObservableObject {
     // 所有來源一次只下載一集（避免並行請求過多）
     private let chapterSem = AsyncSemaphore(limit: 1)
 
+    // MARK: - 來源註冊
+
+    struct SourceHandlers {
+        var hasChapters: Bool
+        var fetchChapters: (Gallery) async throws -> [Chapter]
+        var fetchImageURLs: (URL) async throws -> [URL]
+    }
+
+    nonisolated(unsafe) private static var handlers: [SourceID: SourceHandlers] = [:]
+
+    nonisolated static func register(_ sourceID: SourceID, handlers: SourceHandlers) {
+        self.handlers[sourceID] = handlers
+    }
+
+    nonisolated static func isChapterBased(_ sourceID: SourceID) -> Bool {
+        handlers[sourceID]?.hasChapters ?? false
+    }
+
     // MARK: - 路徑（依來源分資料夾）
 
     // 漫畫名稱資料夾：{library}/manhuagui/{safeTitle}/
@@ -129,7 +147,7 @@ final class DownloadManager: ObservableObject {
     func state(for gallery: Gallery) -> DownloadState {
         if cbzURL(for: gallery) != nil { return .completed }
         // 章節型來源：有任何章節 CBZ 在磁碟 = 已下載（跨重啟也能正確顯示）
-        if (gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic),
+        if DownloadManager.isChapterBased(gallery.sourceID),
            downloadedChapterCount(gallery: gallery) > 0 { return .completed }
         // 有 staging 目錄 = 已下載一部分
         if let dir = stagingDir(for: gallery),
@@ -143,7 +161,7 @@ final class DownloadManager: ObservableObject {
 
     func isDownloaded(_ gallery: Gallery) -> Bool {
         if cbzURL(for: gallery) != nil { return true }
-        if (gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic) {
+        if DownloadManager.isChapterBased(gallery.sourceID) {
             return downloadedChapterCount(gallery: gallery) > 0
         }
         return false
@@ -201,8 +219,8 @@ final class DownloadManager: ObservableObject {
             try? FileManager.default.removeItem(at: cbz)
         }
         // 章節型來源：刪除整個漫畫資料夾（含所有章節 CBZ）
-        let isChapterBased = gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic
-        if isChapterBased, let folder = comicFolder(for: gallery) {
+        if DownloadManager.isChapterBased(gallery.sourceID),
+           let folder = comicFolder(for: gallery) {
             try? FileManager.default.removeItem(at: folder)
         }
         // 清除 staging 殘留
@@ -346,8 +364,7 @@ final class DownloadManager: ObservableObject {
 
     private func performDownload(gallery: Gallery) async {
         // 章節型來源（漫畫人、漫畫櫃）：先取章節列表再逐章下載
-        let isChapterBased = gallery.sourceID == .manhuagui || gallery.sourceID == .manhuaren || gallery.sourceID == .eightcomic
-        if isChapterBased {
+        if DownloadManager.isChapterBased(gallery.sourceID) {
             await performChapterBasedDownload(gallery: gallery)
             return
         }
@@ -434,13 +451,11 @@ final class DownloadManager: ObservableObject {
     private func performChapterBasedDownload(gallery: Gallery) async {
         dlog("performChapterBasedDownload START \(gallery.id)")
         do {
-            let chapters: [Chapter]
-            switch gallery.sourceID {
-            case .manhuagui:  chapters = try await ManhuaguiService.shared.fetchChapters(comicURL: gallery.galleryURL)
-            case .manhuaren:  chapters = try await ManhuarenService.shared.fetchChapters(galleryURL: gallery.galleryURL)
-            case .eightcomic: chapters = try await EightcomicService.shared.fetchChapters(mangaURL: gallery.galleryURL)
-            default: chapters = []
+            guard let handler = DownloadManager.handlers[gallery.sourceID] else {
+                await MainActor.run { states[gallery.id] = .failed("來源未支援下載") }
+                return
             }
+            let chapters = try await handler.fetchChapters(gallery)
             guard !chapters.isEmpty else {
                 await MainActor.run { states[gallery.id] = .failed("無章節") }
                 return
@@ -476,13 +491,10 @@ final class DownloadManager: ObservableObject {
         dlog("performChapterDownload START \(chapter.id) '\(chapter.title)'")
 
         do {
-            let imageURLs: [URL]
-            switch gallery.sourceID {
-            case .manhuagui:  imageURLs = try await ManhuaguiService.shared.fetchChapterImages(chapterURL: chapter.url)
-            case .manhuaren:  imageURLs = try await ManhuarenService.shared.fetchChapterImages(chapterURL: chapter.url)
-            case .eightcomic: imageURLs = try await EightcomicService.shared.fetchChapterImages(chapterURL: chapter.url)
-            default: throw DownloadError.noImages
+            guard let handler = DownloadManager.handlers[gallery.sourceID] else {
+                throw DownloadError.noImages
             }
+            let imageURLs = try await handler.fetchImageURLs(chapter.url)
             let total = imageURLs.count
             guard total > 0 else { throw DownloadError.noImages }
 
